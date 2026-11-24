@@ -1,0 +1,8 @@
+{
+  "name": "JavaChat",
+  "entry": "JavaChat.dll",
+  "version": "1.0.0",
+  "type": "native",
+  "platform": "client",
+  "description": "Lightweight Java Edition style chat overlay and minimal input bar for Minecraft Bedrock."
+}

@@ -1,0 +1,10 @@
+.xmake/
+build/
+bin/
+dist/
+*.pdb
+*.ilk
+*.exp
+*.lib
+.vs/
+*.user

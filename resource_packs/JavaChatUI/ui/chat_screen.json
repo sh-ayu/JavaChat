@@ -1,0 +1,377 @@
+{
+  "namespace": "chat",
+
+  // Force vanilla screen routing so server packs cannot inject heavy sidebars.
+  "chat_screen@common.base_screen": {
+    "close_on_player_hurt": true,
+    "$screen_content": "chat.chat_screen_content",
+    "$screen_bg_content": "chat.chat_background",
+    "button_mappings": [
+      {
+        "from_button_id": "button.menu_exit",
+        "to_button_id": "button.chat_menu_cancel",
+        "mapping_type": "global"
+      },
+      {
+        "from_button_id": "button.menu_cancel",
+        "to_button_id": "button.chat_menu_cancel",
+        "mapping_type": "global"
+      }
+    ]
+  },
+
+  // Vanilla Java-style transparent backdrop (no full-screen dimming).
+  "chat_background": {
+    "type": "panel",
+    "size": ["100%", "100%"]
+  },
+
+  // Authentic Java Edition style: plain translucent black bar, no border or accent strip.
+  "java_input_bg": {
+    "type": "image",
+    "texture": "textures/ui/White",
+    "color": [0.0, 0.0, 0.0],
+    "alpha": 0.48,
+    "size": ["100%", "100%"]
+  },
+
+  "java_input_bg_hover": {
+    "type": "image",
+    "texture": "textures/ui/White",
+    "color": [0.0, 0.0, 0.0],
+    "alpha": 0.55,
+    "size": ["100%", "100%"]
+  },
+
+  // Single-Esc close + Java-style thin bottom input box.
+  "text_edit_box@common.text_edit_box": {
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
+    "size": ["100%", 14],
+    "max_length": "$max_text_edit_length",
+    "always_listening": true,
+    "$text_box_name": "#message_text_box",
+    "$text_edit_box_content_binding_name": "#message_text_box_content",
+    "default_focus_precedence": 1,
+    "$focus_id": "text_edit_box_focus_id",
+    "$focus_override_left": "",
+    "$text_box_tts_header": "accessibility.chat.tts.textboxTitle",
+    "$text_background_default": "chat.java_input_bg",
+    "$text_background_hover": "chat.java_input_bg_hover",
+    "$text_offset": [2, 0],
+    "$shadow": true,
+    "$text_alignment": "left",
+    "$place_holder_text": "",
+    "bindings": [
+      {
+        "binding_type": "$text_edit_box_enabled_binding_type",
+        "binding_collection_name": "$text_edit_box_grid_collection_name",
+        "binding_name": "$text_box_enabled_binding_name",
+        "binding_name_override": "#enabled"
+      },
+      {
+        "binding_name": "#text_edit_box_focus_override_up",
+        "binding_name_override": "#focus_change_up"
+      },
+      {
+        "binding_name": "#text_edit_box_focus_override_down",
+        "binding_name_override": "#focus_change_down"
+      }
+    ],
+    "button_mappings": [
+      {
+        "from_button_id": "button.menu_select",
+        "to_button_id": "$text_edit_box_selected_to_button_id",
+        "handle_select": true,
+        "handle_deselect": false,
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.menu_select",
+        "to_button_id": "$text_edit_box_selected_to_button_id",
+        "handle_select": false,
+        "handle_deselect": true,
+        "mapping_type": "global",
+        "consume_event": false
+      },
+      {
+        "from_button_id": "button.menu_ok",
+        "to_button_id": "$text_edit_box_selected_to_button_id",
+        "handle_select": true,
+        "handle_deselect": false,
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "button.menu_ok",
+        "to_button_id": "$text_edit_box_selected_to_button_id",
+        "handle_select": false,
+        "handle_deselect": false,
+        "mapping_type": "global"
+      },
+      {
+        "from_button_id": "button.menu_cancel",
+        "to_button_id": "$text_edit_box_deselected_to_button_id",
+        "handle_select": false,
+        "handle_deselect": true,
+        "consume_event": false,
+        "mapping_type": "global"
+      },
+      {
+        "to_button_id": "$text_edit_box_hovered_button_id",
+        "mapping_type": "pressed"
+      },
+      {
+        "from_button_id": "$text_edit_box_clear_from_button_id",
+        "to_button_id": "$text_edit_box_clear_to_button_id",
+        "handle_select": false,
+        "handle_deselect": false,
+        "mapping_type": "focused"
+      },
+      {
+        "from_button_id": "button.menu_autocomplete",
+        "to_button_id": "button.chat_autocomplete",
+        "handle_select": true,
+        "handle_deselect": false,
+        "mapping_type": "global"
+      },
+      {
+        "from_button_id": "button.menu_autocomplete_back",
+        "to_button_id": "button.chat_autocomplete_back",
+        "handle_select": true,
+        "handle_deselect": false,
+        "mapping_type": "global"
+      },
+      {
+        "from_button_id": "button.menu_textedit_up",
+        "to_button_id": "button.chat_previous_message",
+        "handle_select": true,
+        "handle_deselect": false,
+        "mapping_type": "focused"
+      },
+      {
+        "from_button_id": "button.menu_textedit_down",
+        "to_button_id": "button.chat_next_message",
+        "handle_select": true,
+        "handle_deselect": false,
+        "mapping_type": "focused"
+      },
+      {
+        "from_button_id": "button.controller_select",
+        "to_button_id": "button.send",
+        "mapping_type": "global",
+        "handle_select": false,
+        "handle_deselect": false
+      },
+      {
+        "from_button_id": "button.controller_start",
+        "to_button_id": "button.send",
+        "mapping_type": "global",
+        "handle_select": false,
+        "handle_deselect": false
+      },
+      {
+        "from_button_id": "button.controller_autocomplete",
+        "to_button_id": "button.chat_autocomplete",
+        "handle_select": false,
+        "handle_deselect": false,
+        "mapping_type": "global"
+      },
+      {
+        "from_button_id": "button.controller_autocomplete_back",
+        "to_button_id": "button.chat_autocomplete_back",
+        "handle_select": false,
+        "handle_deselect": false,
+        "mapping_type": "global"
+      },
+      {
+        "from_button_id": "button.controller_textedit_up",
+        "to_button_id": "button.chat_previous_message",
+        "handle_select": false,
+        "handle_deselect": false,
+        "mapping_type": "focused"
+      },
+      {
+        "from_button_id": "button.controller_textedit_down",
+        "to_button_id": "button.chat_next_message",
+        "handle_select": false,
+        "handle_deselect": false,
+        "mapping_type": "focused"
+      },
+      {
+        "from_button_id": "button.controller_secondary_select",
+        "to_button_id": "button.chat_paste_coordinates",
+        "handle_select": true,
+        "handle_deselect": false,
+        "mapping_type": "global"
+      }
+    ]
+  },
+
+  // Ultra-lightweight chat screen: ONLY bottom input box + command autocomplete popup.
+  "chat_screen_content": {
+    "type": "panel",
+    "size": ["100%", "100%"],
+    "controls": [
+      {
+        "chat_bottom_panel@chat.chat_bottom_panel": {
+          "layer": 2
+        }
+      },
+      {
+        "autocomplete_commands_panel@chat.commands_panel": {
+          "layer": 6
+        }
+      }
+    ]
+  },
+
+  // Authentic Java-style thin bottom input bar (offset [2, -2], height 14).
+  "chat_bottom_panel": {
+    "type": "panel",
+    "anchor_from": "bottom_left",
+    "anchor_to": "bottom_left",
+    "offset": [2, -2],
+    "size": ["100% - 4px", 14],
+    "min_size": ["100% - 4px", 14],
+    "controls": [
+      {
+        "text_box@chat.text_edit_box": {}
+      }
+    ]
+  },
+
+  // Compact Java-style command suggestions popup directly above the 14px input bar (max 10 rows).
+  "commands_panel": {
+    "type": "panel",
+    "anchor_from": "bottom_left",
+    "anchor_to": "bottom_left",
+    "offset": [2, -18],
+    "size": ["65%", 110],
+    "max_size": [340, 110],
+    "clips_children": true,
+    "controls": [
+      {
+        "auto_complete_panel@chat.auto_complete_panel": {
+          "anchor_from": "bottom_left",
+          "anchor_to": "bottom_left"
+        }
+      }
+    ]
+  },
+
+  "click_autocomplete_is_focused": {
+    "type": "image",
+    "texture": "textures/ui/White",
+    "color": [1.0, 1.0, 1.0],
+    "alpha": 0.16,
+    "size": ["100%", "100%"]
+  },
+
+  // Plain Java-style translucent black suggestion rows.
+  // Empty grid slots hide their background via (#auto_complete_text != '') so no black box
+  // ever appears when autocomplete is inactive, and text uses ["default", "default"] with
+  // parent clipping so long descriptions never wrap onto the next row.
+  "auto_complete_panel_contents_with_item": {
+    "type": "panel",
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
+    "size": ["100%", 11],
+    "clips_children": true,
+    "controls": [
+      {
+        "row_bg": {
+          "type": "image",
+          "texture": "textures/ui/White",
+          "color": [0.0, 0.0, 0.0],
+          "alpha": 0.72,
+          "size": ["100%", "100%"],
+          "layer": 0,
+          "bindings": [
+            {
+              "binding_type": "collection",
+              "binding_name": "#auto_complete_text",
+              "binding_collection_name": "auto_complete"
+            },
+            {
+              "binding_type": "view",
+              "source_property_name": "(not (#auto_complete_text = ''))",
+              "target_property_name": "#visible"
+            }
+          ]
+        }
+      },
+      {
+        "auto_complete_item_renderer@common.item_renderer": {
+          "size": [9, 9],
+          "offset": [2, 0],
+          "anchor_from": "left_middle",
+          "anchor_to": "left_middle",
+          "layer": 2,
+          "bindings": [
+            {
+              "binding_name": "#auto_complete_item",
+              "binding_type": "collection",
+              "binding_name_override": "#item_id_aux",
+              "binding_collection_name": "auto_complete"
+            }
+          ]
+        }
+      },
+      {
+        "text": {
+          "type": "label",
+          "color": [1.0, 1.0, 1.0],
+          "shadow": true,
+          "enable_profanity_filter": true,
+          "offset": [3, 0],
+          "size": ["default", "default"],
+          "anchor_from": "left_middle",
+          "anchor_to": "left_middle",
+          "text": "#text",
+          "localize": false,
+          "layer": 2,
+          "bindings": [
+            {
+              "binding_type": "collection",
+              "binding_name": "#auto_complete_text",
+              "binding_name_override": "#text",
+              "binding_collection_name": "auto_complete"
+            }
+          ]
+        }
+      },
+      {
+        "autocomplete_button@common.button": {
+          "$pressed_button_name": "button.click_autocomplete",
+          "tts_inherit_siblings": true,
+          "layer": 3,
+          "controls": [
+            {
+              "default": {
+                "type": "panel"
+              }
+            },
+            {
+              "hover@chat.click_autocomplete_is_focused": {}
+            },
+            {
+              "pressed@chat.click_autocomplete_is_focused": {}
+            }
+          ],
+          "bindings": [
+            {
+              "binding_type": "collection",
+              "binding_name": "#is_autocomplete_suggestion",
+              "binding_name_override": "#visible",
+              "binding_collection_name": "auto_complete"
+            },
+            {
+              "binding_type": "collection_details",
+              "binding_collection_name": "auto_complete"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
