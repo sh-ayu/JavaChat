@@ -4,6 +4,11 @@
   // Force vanilla screen routing so server packs cannot inject heavy sidebars.
   "chat_screen@common.base_screen": {
     "close_on_player_hurt": true,
+    "send_telemetry": false,
+    "$screen_animations": [],
+    "$background_animations": [],
+    "$use_loading_bars": false,
+    "$jchat_font_type|default": "default",
     "$screen_content": "chat.chat_screen_content",
     "$screen_bg_content": "chat.chat_background",
     "button_mappings": [
@@ -26,12 +31,12 @@
     "size": ["100%", "100%"]
   },
 
-  // Authentic Java Edition style: plain translucent black bar, no border or accent strip.
+  // Authentic Java Edition style: plain translucent black bar (0x80000000), no border or accent strip.
   "java_input_bg": {
     "type": "image",
     "texture": "textures/ui/White",
     "color": [0.0, 0.0, 0.0],
-    "alpha": 0.48,
+    "alpha": 0.5,
     "size": ["100%", "100%"]
   },
 
@@ -39,15 +44,15 @@
     "type": "image",
     "texture": "textures/ui/White",
     "color": [0.0, 0.0, 0.0],
-    "alpha": 0.55,
+    "alpha": 0.5,
     "size": ["100%", "100%"]
   },
 
-  // Single-Esc close + Java-style thin bottom input box.
+  // Single-Esc close + Java-style 12px bottom input box.
   "text_edit_box@common.text_edit_box": {
     "anchor_from": "top_left",
     "anchor_to": "top_left",
-    "size": ["100%", 14],
+    "size": ["100%", 12],
     "max_length": "$max_text_edit_length",
     "always_listening": true,
     "$text_box_name": "#message_text_box",
@@ -58,7 +63,9 @@
     "$text_box_tts_header": "accessibility.chat.tts.textboxTitle",
     "$text_background_default": "chat.java_input_bg",
     "$text_background_hover": "chat.java_input_bg_hover",
-    "$text_offset": [2, 0],
+    "$text_edit_clipping_panel_size": ["100% + 2px", 12],
+    "$text_offset": [-1, 0],
+    "$text_edit_box_label_offset": [0, 0],
     "$shadow": true,
     "$text_alignment": "left",
     "$place_holder_text": "",
@@ -207,7 +214,8 @@
     ]
   },
 
-  // Ultra-lightweight chat screen: ONLY bottom input box + command autocomplete popup.
+  // Ultra-lightweight chat screen: ONLY bottom 12px input box.
+  // Suggestions popup & syntax/ghost visuals are rendered natively by C++ AfterUIRenderEvent.
   "chat_screen_content": {
     "type": "panel",
     "size": ["100%", "100%"],
@@ -216,161 +224,21 @@
         "chat_bottom_panel@chat.chat_bottom_panel": {
           "layer": 2
         }
-      },
-      {
-        "autocomplete_commands_panel@chat.commands_panel": {
-          "layer": 6
-        }
       }
     ]
   },
 
-  // Authentic Java-style thin bottom input bar (offset [2, -2], height 14).
+  // Authentic Java-style 12px bottom input bar (offset [2, -2], width calc(100% - 4px)).
   "chat_bottom_panel": {
     "type": "panel",
     "anchor_from": "bottom_left",
     "anchor_to": "bottom_left",
     "offset": [2, -2],
-    "size": ["100% - 4px", 14],
-    "min_size": ["100% - 4px", 14],
+    "size": ["100% - 4px", 12],
+    "min_size": ["100% - 4px", 12],
     "controls": [
       {
         "text_box@chat.text_edit_box": {}
-      }
-    ]
-  },
-
-  // Compact Java-style command suggestions popup directly above the 14px input bar (max 10 rows).
-  "commands_panel": {
-    "type": "panel",
-    "anchor_from": "bottom_left",
-    "anchor_to": "bottom_left",
-    "offset": [2, -18],
-    "size": ["65%", 110],
-    "max_size": [340, 110],
-    "clips_children": true,
-    "controls": [
-      {
-        "auto_complete_panel@chat.auto_complete_panel": {
-          "anchor_from": "bottom_left",
-          "anchor_to": "bottom_left"
-        }
-      }
-    ]
-  },
-
-  "click_autocomplete_is_focused": {
-    "type": "image",
-    "texture": "textures/ui/White",
-    "color": [1.0, 1.0, 1.0],
-    "alpha": 0.16,
-    "size": ["100%", "100%"]
-  },
-
-  // Plain Java-style translucent black suggestion rows.
-  // Empty grid slots hide their background via (#auto_complete_text != '') so no black box
-  // ever appears when autocomplete is inactive, and text uses ["default", "default"] with
-  // parent clipping so long descriptions never wrap onto the next row.
-  "auto_complete_panel_contents_with_item": {
-    "type": "panel",
-    "anchor_from": "top_left",
-    "anchor_to": "top_left",
-    "size": ["100%", 11],
-    "clips_children": true,
-    "controls": [
-      {
-        "row_bg": {
-          "type": "image",
-          "texture": "textures/ui/White",
-          "color": [0.0, 0.0, 0.0],
-          "alpha": 0.72,
-          "size": ["100%", "100%"],
-          "layer": 0,
-          "bindings": [
-            {
-              "binding_type": "collection",
-              "binding_name": "#auto_complete_text",
-              "binding_collection_name": "auto_complete"
-            },
-            {
-              "binding_type": "view",
-              "source_property_name": "(not (#auto_complete_text = ''))",
-              "target_property_name": "#visible"
-            }
-          ]
-        }
-      },
-      {
-        "auto_complete_item_renderer@common.item_renderer": {
-          "size": [9, 9],
-          "offset": [2, 0],
-          "anchor_from": "left_middle",
-          "anchor_to": "left_middle",
-          "layer": 2,
-          "bindings": [
-            {
-              "binding_name": "#auto_complete_item",
-              "binding_type": "collection",
-              "binding_name_override": "#item_id_aux",
-              "binding_collection_name": "auto_complete"
-            }
-          ]
-        }
-      },
-      {
-        "text": {
-          "type": "label",
-          "color": [1.0, 1.0, 1.0],
-          "shadow": true,
-          "enable_profanity_filter": true,
-          "offset": [3, 0],
-          "size": ["default", "default"],
-          "anchor_from": "left_middle",
-          "anchor_to": "left_middle",
-          "text": "#text",
-          "localize": false,
-          "layer": 2,
-          "bindings": [
-            {
-              "binding_type": "collection",
-              "binding_name": "#auto_complete_text",
-              "binding_name_override": "#text",
-              "binding_collection_name": "auto_complete"
-            }
-          ]
-        }
-      },
-      {
-        "autocomplete_button@common.button": {
-          "$pressed_button_name": "button.click_autocomplete",
-          "tts_inherit_siblings": true,
-          "layer": 3,
-          "controls": [
-            {
-              "default": {
-                "type": "panel"
-              }
-            },
-            {
-              "hover@chat.click_autocomplete_is_focused": {}
-            },
-            {
-              "pressed@chat.click_autocomplete_is_focused": {}
-            }
-          ],
-          "bindings": [
-            {
-              "binding_type": "collection",
-              "binding_name": "#is_autocomplete_suggestion",
-              "binding_name_override": "#visible",
-              "binding_collection_name": "auto_complete"
-            },
-            {
-              "binding_type": "collection_details",
-              "binding_collection_name": "auto_complete"
-            }
-          ]
-        }
       }
     ]
   }

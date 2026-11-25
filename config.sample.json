@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 3,
   "enabled": true,
   "overrideServerChatUi": true,
   "width": 320.0,
@@ -8,8 +8,8 @@
   "bottomOffset": 40.0,
   "leftOffset": 2.0,
   "fontScale": 1.0,
-  "lineSpacing": 1.5,
-  "backgroundOpacity": 0.38,
+  "lineSpacing": 0.0,
+  "backgroundOpacity": 0.5,
   "textOpacity": 1.0,
   "textShadow": true,
   "fadeDelaySec": 9.0,
@@ -20,6 +20,10 @@
   "showTimestamps": false,
   "clickToCopy": true,
   "clickToOpenUrl": true,
-  "clearHistoryOnWorldSwitch": false,
+  "autoCloseOnSend": true,
+  "disableChatAnimations": true,
+  "keepHudVisibleInChat": true,
+  "font": "default",
+  "clearHistoryOnWorldSwitch": true,
   "verboseLog": false
 }

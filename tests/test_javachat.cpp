@@ -1,6 +1,7 @@
 #include "core/ChatConfig.h"
 #include "core/ChatFormatter.h"
 #include "core/ChatHistory.h"
+#include "core/CommandSuggestions.h"
 
 #include <cmath>
 #include <cstdio>
@@ -30,14 +31,19 @@ int gFailed = 0;
 void testConfigParseAndRoundTrip() {
     using namespace javachat;
     ChatConfig cfg;
-    cfg.width             = 280.0f;
-    cfg.closedHeight      = 80.0f;
-    cfg.openHeight        = 200.0f;
-    cfg.backgroundOpacity = 0.45f;
-    cfg.fontScale         = 1.15f;
-    cfg.showTimestamps    = true;
-    cfg.compactDuplicates = false;
-    cfg.maxHistoryMessages = 750;
+    cfg.width                 = 280.0f;
+    cfg.closedHeight          = 80.0f;
+    cfg.openHeight            = 200.0f;
+    cfg.backgroundOpacity     = 0.45f;
+    cfg.fontScale             = 1.15f;
+    cfg.fadeDurationSec       = 0.0f;
+    cfg.showTimestamps        = true;
+    cfg.compactDuplicates     = false;
+    cfg.autoCloseOnSend       = false;
+    cfg.disableChatAnimations = false;
+    cfg.keepHudVisibleInChat  = false;
+    cfg.font                  = R"(C:\Windows\Fonts\BIZUDPGothic-Regular.ttf)";
+    cfg.maxHistoryMessages    = 750;
 
     std::string json = serializeConfigJson(cfg);
     ChatConfig  parsed;
@@ -49,23 +55,136 @@ void testConfigParseAndRoundTrip() {
     CHECK_NEAR(parsed.openHeight, 200.0f, 0.01f);
     CHECK_NEAR(parsed.backgroundOpacity, 0.45f, 0.01f);
     CHECK_NEAR(parsed.fontScale, 1.15f, 0.01f);
+    CHECK_NEAR(parsed.fadeDurationSec, 0.0f, 0.001f);
     CHECK(parsed.showTimestamps == true);
     CHECK(parsed.compactDuplicates == false);
+    CHECK(parsed.autoCloseOnSend == false);
+    CHECK(parsed.disableChatAnimations == false);
+    CHECK(parsed.keepHudVisibleInChat == false);
+    CHECK(parsed.font == R"(C:\Windows\Fonts\BIZUDPGothic-Regular.ttf)");
     CHECK(parsed.maxHistoryMessages == 750);
+
+    // Built-in font name normalization
+    std::string canonical;
+    CHECK(isBuiltinFontName("Mojangles", &canonical) && canonical == "default");
+    CHECK(isBuiltinFontName("ui", &canonical) && canonical == "ui");
+    CHECK(isBuiltinFontName("UI", &canonical) && canonical == "ui");
+    CHECK(isBuiltinFontName(" SMOOTH ", &canonical) && canonical == "smooth");
+    CHECK(isBuiltinFontName("mc10", &canonical) && canonical == "MinecraftTen");
+    CHECK(isBuiltinFontName("unicode", &canonical) && canonical == "unicode");
+    CHECK(isBuiltinFontName("rune", &canonical) && canonical == "rune");
+    CHECK(isBuiltinFontName("smoothsmall", &canonical) && canonical == "SmoothSmall");
+    CHECK(!isBuiltinFontName("arial.ttf", &canonical));
 
     // Clamping & unknown keys & type mismatch handling
     ChatConfig clamped;
     warn.clear();
     CHECK(parseConfigJson(
-        R"({"width": 9999, "fontScale": -5, "backgroundOpacity": 2.5, "enabled": "bad", "unknown": [1,2,3]})",
+        R"({"width": 9999, "fontScale": -5, "fadeDurationSec": -1.0, "backgroundOpacity": 2.5, "font": "  mojangles ", "enabled": "bad", "unknown": [1,2,3]})",
         clamped,
         &warn
     ));
     CHECK_NEAR(clamped.width, 640.0f, 0.01f);
     CHECK_NEAR(clamped.fontScale, 0.5f, 0.01f);
+    CHECK_NEAR(clamped.fadeDurationSec, 0.0f, 0.001f);
     CHECK_NEAR(clamped.backgroundOpacity, 1.0f, 0.01f);
+    CHECK(clamped.font == "default");
     CHECK(clamped.enabled == true); // fallback default
     CHECK(!warn.empty());
+
+    // Defaults: version 3, lineSpacing 0.0, backgroundOpacity 0.50, and clearHistoryOnWorldSwitch / keepHudVisibleInChat enabled.
+    ChatConfig defaultsCheck;
+    CHECK(defaultsCheck.version == 3);
+    CHECK_NEAR(defaultsCheck.lineSpacing, 0.0f, 0.001f);
+    CHECK_NEAR(defaultsCheck.backgroundOpacity, 0.50f, 0.001f);
+    CHECK(defaultsCheck.keepHudVisibleInChat == true);
+    CHECK(defaultsCheck.clearHistoryOnWorldSwitch == true);
+
+    // Backward compatibility & v1->v3 / v2->v3 migrations.
+    ChatConfig v10;
+    warn.clear();
+    bool migratedV1 = false;
+    CHECK(parseConfigJson(R"({"version":1,"width":300.0,"fadeDurationSec":1.0})", v10, &warn, &migratedV1));
+    CHECK(warn.empty());
+    CHECK(migratedV1 == true);
+    CHECK(v10.version == 3);
+    CHECK_NEAR(v10.lineSpacing, 0.0f, 0.001f);
+    CHECK_NEAR(v10.backgroundOpacity, 0.50f, 0.001f);
+    CHECK(v10.autoCloseOnSend == true);
+    CHECK(v10.disableChatAnimations == true);
+    CHECK(v10.keepHudVisibleInChat == true);
+    CHECK(v10.clearHistoryOnWorldSwitch == true);
+    CHECK(v10.font == "default");
+
+    ChatConfig v1ExplicitFalse;
+    bool       migratedV1False = false;
+    warn.clear();
+    CHECK(parseConfigJson(R"({"version":1,"clearHistoryOnWorldSwitch":false})", v1ExplicitFalse, &warn, &migratedV1False));
+    CHECK(warn.empty());
+    CHECK(migratedV1False == true);
+    CHECK(v1ExplicitFalse.version == 3);
+    CHECK(v1ExplicitFalse.clearHistoryOnWorldSwitch == true);
+
+    // v2 with old defaults (1.5 / 0.38) migrates visuals to 0.0 / 0.50 while keeping explicit clearHistoryOnWorldSwitch.
+    ChatConfig v2Defaults;
+    bool       migratedV2Def = false;
+    warn.clear();
+    CHECK(parseConfigJson(
+        R"({"version":2,"lineSpacing":1.5,"backgroundOpacity":0.38,"clearHistoryOnWorldSwitch":false})",
+        v2Defaults,
+        &warn,
+        &migratedV2Def
+    ));
+    CHECK(warn.empty());
+    CHECK(migratedV2Def == true);
+    CHECK(v2Defaults.version == 3);
+    CHECK_NEAR(v2Defaults.lineSpacing, 0.0f, 0.001f);
+    CHECK_NEAR(v2Defaults.backgroundOpacity, 0.50f, 0.001f);
+    CHECK(v2Defaults.clearHistoryOnWorldSwitch == false);
+
+    // v2 with custom lineSpacing / backgroundOpacity preserves customized values during v3 upgrade.
+    ChatConfig v2Custom;
+    bool       migratedV2Cust = false;
+    warn.clear();
+    CHECK(parseConfigJson(
+        R"({"version":2,"lineSpacing":2.5,"backgroundOpacity":0.70,"clearHistoryOnWorldSwitch":false})",
+        v2Custom,
+        &warn,
+        &migratedV2Cust
+    ));
+    CHECK(warn.empty());
+    CHECK(migratedV2Cust == true);
+    CHECK(v2Custom.version == 3);
+    CHECK_NEAR(v2Custom.lineSpacing, 2.5f, 0.001f);
+    CHECK_NEAR(v2Custom.backgroundOpacity, 0.70f, 0.001f);
+    CHECK(v2Custom.clearHistoryOnWorldSwitch == false);
+
+    // v3 explicit 1.5 / 0.38 stays untouched (no re-migration).
+    ChatConfig v3Explicit;
+    bool       migratedV3 = true;
+    warn.clear();
+    CHECK(parseConfigJson(
+        R"({"version":3,"lineSpacing":1.5,"backgroundOpacity":0.38,"clearHistoryOnWorldSwitch":false})",
+        v3Explicit,
+        &warn,
+        &migratedV3
+    ));
+    CHECK(warn.empty());
+    CHECK(migratedV3 == false);
+    CHECK(v3Explicit.version == 3);
+    CHECK_NEAR(v3Explicit.lineSpacing, 1.5f, 0.001f);
+    CHECK_NEAR(v3Explicit.backgroundOpacity, 0.38f, 0.001f);
+    CHECK(v3Explicit.clearHistoryOnWorldSwitch == false);
+
+    ChatConfig v3RoundTrip;
+    bool       migratedV3Rt = true;
+    warn.clear();
+    CHECK(parseConfigJson(serializeConfigJson(v3Explicit), v3RoundTrip, &warn, &migratedV3Rt));
+    CHECK(warn.empty());
+    CHECK(migratedV3Rt == false);
+    CHECK(v3RoundTrip.version == 3);
+    CHECK_NEAR(v3RoundTrip.lineSpacing, 1.5f, 0.001f);
+    CHECK_NEAR(v3RoundTrip.backgroundOpacity, 0.38f, 0.001f);
 
     // Malformed JSON rejected
     ChatConfig bad;
@@ -520,6 +639,319 @@ void testMultiUrlPerLineExtraction() {
     }
 }
 
+void testOptimizationNeedsSyncFontRevisionAndZeroFade() {
+    using namespace javachat;
+    ChatConfig cfg;
+    cfg.width             = 220.0f;
+    cfg.openHeight        = 60.0f;
+    cfg.closedHeight      = 30.0f;
+    cfg.lineSpacing       = 1.0f;
+    cfg.fadeDelaySec      = 9.0f;
+    cfg.fadeDurationSec   = 0.0f;
+    cfg.compactDuplicates = false;
+    cfg.maxHistoryMessages = 500;
+
+    // Instant fade when fadeDurationSec == 0.0
+    CHECK_NEAR(ChatHistory::computeFadeAlpha(8.9, false, cfg), 1.0f, 0.001f);
+    CHECK_NEAR(ChatHistory::computeFadeAlpha(9.0, false, cfg), 1.0f, 0.001f);
+    CHECK_NEAR(ChatHistory::computeFadeAlpha(9.01, false, cfg), 0.0f, 0.001f);
+
+    ChatHistory h;
+    CHECK(!h.needsSync(0, "", 0, "", 0, 0.0f, 1.0));
+    CHECK(!h.hasVisibleClosedMessages(1.0, cfg));
+
+    std::vector<GuiMessageSnapshot> s1 = {
+        {"msg-1", 10.0f, 1},
+        {"msg-2", 10.0f, 1},
+    };
+    CHECK(h.needsSync(2, "msg-1", 1, "msg-2", 1, 10.0f, 1.0));
+    CHECK(h.syncFromGuiMessages(s1, 1.0, cfg) == 2);
+    CHECK(!h.needsSync(2, "msg-1", 1, "msg-2", 1, 9.8f, 1.2)); // normal aging -> O(1) skip
+    CHECK(h.needsSync(3, "msg-1", 1, "msg-3", 1, 10.0f, 1.5)); // count changed
+    CHECK(h.needsSync(2, "msg-0", 1, "msg-2", 1, 9.5f, 1.5)); // head changed
+    CHECK(h.needsSync(2, "msg-1", 2, "msg-2", 1, 9.5f, 1.5)); // type changed
+    CHECK(h.needsSync(2, "msg-1", 1, "msg-2", 1, 2.0f, 1.1)); // duration jump at same count
+    CHECK(!h.needsSync(2, "msg-1", 1, "msg-2", 1, 10.0f, 1.1));
+    std::vector<GuiMessageSnapshot> sSame = {
+        {"msg-2", 3.0f, 1},
+        {"msg-2", 3.0f, 1},
+    };
+    h.syncFromGuiMessages(sSame, 5.0, cfg);
+    CHECK(h.needsSync(2, "msg-2", 1, "msg-2", 1, 10.0f, 5.1)); // identical ring jump detected
+
+    // hasVisibleClosedMessages respects fadeDelaySec + fadeDurationSec
+    CHECK(h.hasVisibleClosedMessages(13.9, cfg));
+    CHECK(!h.hasVisibleClosedMessages(14.1, cfg));
+
+    // fontRevision invalidates wrap cache cleanly
+    int           measureCalls = 0;
+    TextMeasureFn counting     = [&](std::string_view sv) -> float {
+        ++measureCalls;
+        return estimateTextWidth(sv, cfg.fontScale);
+    };
+    (void)h.buildView(640.0f, 360.0f, true, 6.0, cfg, counting, -1.0f, 1);
+    int afterRev1 = measureCalls;
+    (void)h.buildView(640.0f, 360.0f, true, 6.1, cfg, counting, -1.0f, 1);
+    CHECK(measureCalls == afterRev1); // cache hit
+    (void)h.buildView(640.0f, 360.0f, true, 6.2, cfg, counting, -1.0f, 2);
+    CHECK(measureCalls > afterRev1); // invalidated on font revision change
+
+    // 500-message open chat view slice & anchor preservation
+    ChatHistory bulk;
+    for (int i = 0; i < 500; ++i) {
+        bulk.pushMessage("line-" + std::to_string(i), static_cast<double>(i), cfg);
+    }
+    TextMeasureFn mono = [](std::string_view sv) { return static_cast<float>(stripFormatting(sv).size()) * 6.0f; };
+    auto vBottom = bulk.buildView(640.0f, 360.0f, true, 501.0, cfg, mono, -1.0f, 1);
+    CHECK(vBottom.lines.size() == 6);
+    CHECK(vBottom.lines.back().text == "line-499");
+    bulk.scrollBy(10);
+    auto vMid = bulk.buildView(640.0f, 360.0f, true, 501.0, cfg, mono, -1.0f, 1);
+    CHECK(vMid.lines.back().text == "line-489");
+    bulk.pushMessage("line-500", 502.0, cfg); // evicts line-0, keeps anchor on line-489
+    auto vAnchored = bulk.buildView(640.0f, 360.0f, true, 502.0, cfg, mono, -1.0f, 1);
+    CHECK(vAnchored.lines.back().text == "line-489");
+}
+
+void testCommandSuggestions() {
+    using namespace javachat;
+
+    // extractSuggestionToken strips Bedrock § color wrappers, description suffixes, & item-icon padding cleanly.
+    CHECK(extractSuggestionToken("gamemode - プレイヤーのゲームモードを設定します。") == "gamemode");
+    CHECK(
+        extractSuggestionToken(
+            "\xC2\xA7" "7\xC2\xA7" "fgamemode\xC2\xA7" "7\xC2\xA7" "f\xC2\xA7" "7 - プレイヤーのゲームモードを設定します。"
+        )
+        == "gamemode"
+    );
+    CHECK(extractSuggestionToken("   \xC2\xA7" "7\xC2\xA7" "fstone\xC2\xA7" "7") == "stone");
+    CHECK(extractSuggestionToken("   stone - Solid block") == "stone");
+    CHECK(extractSuggestionToken("dark-oak - Hyphenated name") == "dark-oak");
+    CHECK(extractSuggestionToken("\"Player - 1\" - quoted selector") == "\"Player - 1\"");
+    CHECK(extractSuggestionToken("...").empty());
+    CHECK(extractSuggestionToken("   ").empty());
+
+    // findActiveTokenSpan + applySuggestionToInput.
+    CHECK(findActiveTokenSpan("/").startByte == 1);
+    CHECK(findActiveTokenSpan("/game").startByte == 1);
+    CHECK(findActiveTokenSpan("/game").argIndex == 0);
+    CHECK(findActiveTokenSpan("/gamemode ").startByte == 10);
+    CHECK(findActiveTokenSpan("/gamemode ").argIndex == 1);
+
+    CHECK(applySuggestionToInput("/", "gamemode") == "/gamemode");
+    CHECK(applySuggestionToInput("/", "/gamemode") == "/gamemode"); // no double slash
+    CHECK(applySuggestionToInput("/game", "gamemode") == "/gamemode");
+    CHECK(applySuggestionToInput("/gamemode ", "creative") == "/gamemode creative");
+    CHECK(applySuggestionToInput("/gamemode c", "creative") == "/gamemode creative");
+    CHECK(applySuggestionToInput("/tp @e[type=z", "zombie") == "/tp @e[type=zombie");
+    CHECK(applySuggestionToInput("/give @s minecraft:dia", "diamond") == "/give @s minecraft:diamond");
+    CHECK(applySuggestionToInput("/give @s minecraft:dia", "minecraft:diamond") == "/give @s minecraft:diamond");
+    CHECK(applySuggestionToInput("hello @Al", "Alice") == "hello Alice");
+
+    // computeInlineGhostSuffix.
+    CHECK(computeInlineGhostSuffix("/game", "gamemode") == "mode");
+    CHECK(computeInlineGhostSuffix("/GAME", "gamemode") == "mode");
+    CHECK(computeInlineGhostSuffix("/gamemode ", "creative") == "creative");
+    CHECK(computeInlineGhostSuffix("/", "gamemode") == "gamemode");
+    CHECK(computeInlineGhostSuffix("/gamemode", "gamemode").empty());
+    CHECK(computeInlineGhostSuffix("/gm", "gamemode").empty());
+
+    // formatJavaCommandSyntax + invariant stripFormatting(out) == input.
+    std::vector<std::string> cmds{"gamemode", "gamerule"};
+    CHECK(formatJavaCommandSyntax("/", cmds, false) == "\xC2\xA7" "7/");
+    CHECK(formatJavaCommandSyntax("/game", cmds, false) == "\xC2\xA7" "7/\xC2\xA7" "cgame");
+    CHECK(formatJavaCommandSyntax("/game", cmds, true) == "\xC2\xA7" "7/\xC2\xA7" "cgame");
+    CHECK(formatJavaCommandSyntax("/gamemode", cmds, false) == "\xC2\xA7" "7/gamemode");
+
+    std::string sixArgs = "/cmd a b c d e f";
+    std::string colored = formatJavaCommandSyntax(sixArgs, {}, true);
+    CHECK(
+        colored == "\xC2\xA7" "7/cmd \xC2\xA7" "ba \xC2\xA7" "eb \xC2\xA7" "ac \xC2\xA7" "dd \xC2\xA7" "6e \xC2\xA7" "bf"
+    );
+    CHECK(stripFormatting(colored) == sixArgs);
+
+    std::string badWithArgs = "/badcmd arg1 arg2";
+    std::string coloredBad  = formatJavaCommandSyntax(badWithArgs, {}, false);
+    CHECK(coloredBad == "\xC2\xA7" "7/\xC2\xA7" "cbadcmd arg1 arg2");
+    CHECK(stripFormatting(coloredBad) == badWithArgs);
+
+    CHECK(formatJavaCommandSyntax("plain text", cmds, false) == "plain text");
+    CHECK(formatJavaCommandSyntax("/say \xC2\xA7" "ahi", cmds, true) == "/say \xC2\xA7" "ahi");
+
+    // CommandSuggestionState navigation, scrolling, Tab cycling, click completion, and layout geometry.
+    CommandSuggestionState state;
+    std::vector<std::string> fifteen;
+    for (int i = 0; i < 15; ++i) {
+        fifteen.push_back("cmd" + std::to_string(i) + " - desc");
+    }
+    state.syncFromBedrock("/", fifteen);
+    CHECK(state.active());
+    CHECK(state.items().size() == 15);
+    CHECK(state.selectedIndex() == 0);
+
+    // Move Up from 0 wraps to last item (14) and scrolls window down.
+    state.moveSelection(-1);
+    CHECK(state.selectedIndex() == 14);
+    CHECK(state.scrollOffset() == 5);
+    // Move Down wraps back to 0 and scrolls window to top.
+    state.moveSelection(+1);
+    CHECK(state.selectedIndex() == 0);
+    CHECK(state.scrollOffset() == 0);
+
+    // Wheel scroll clamping.
+    state.scrollByRows(100);
+    CHECK(state.scrollOffset() == 5);
+    state.scrollByRows(-100);
+    CHECK(state.scrollOffset() == 0);
+
+    // Regression: Bedrock §7§f...§7§f§7 wrapped suggestions yield clean ghost preview & Tab completion.
+    state.syncFromBedrock(
+        "/game",
+        {
+            "\xC2\xA7" "7\xC2\xA7" "fgamemode\xC2\xA7" "7\xC2\xA7" "f\xC2\xA7" "7 - desc",
+            "\xC2\xA7" "7\xC2\xA7" "fgamerule\xC2\xA7" "7\xC2\xA7" "f\xC2\xA7" "7 - desc2",
+        }
+    );
+    CHECK(state.items().size() == 2);
+    CHECK(state.selectedToken() == "gamemode");
+    CHECK(computeInlineGhostSuffix("/game", state.selectedToken()) == "mode");
+
+    // Tab cycling through multiple candidates without losing the list.
+    state.syncFromBedrock("/game", {"gamemode - d1", "gamerule - d2"});
+    auto t1 = state.applyByTab(+1);
+    CHECK(t1.has_value() && t1->newText == "/gamemode" && !t1->refreshIntellisense);
+    // Simulate Bedrock sync at /gamemode while Tab cycling is active -> keeps both candidates.
+    state.syncFromBedrock("/gamemode", {"creative - c", "survival - s"});
+    auto t2 = state.applyByTab(+1);
+    CHECK(t2.has_value() && t2->newText == "/gamerule" && !t2->refreshIntellisense);
+    auto t3 = state.applyByTab(+1);
+    CHECK(t3.has_value() && t3->newText == "/gamemode" && !t3->refreshIntellisense);
+    // User typing next char exits Tab cycle mode.
+    state.syncFromBedrock("/gamemode ", {"creative - c", "survival - s"});
+    CHECK(state.items().size() == 2);
+    CHECK(state.items()[0] == "creative");
+
+    // Popup layout: narrow width, aligned X after "/", flush 1px above 12px input bar (y1 = screenH - 15).
+    state.syncFromBedrock("/game", {"gamemode - desc", "gamerule - long description here"});
+    TextMeasureFn mono6 = [](std::string_view sv) -> float {
+        return static_cast<float>(stripFormatting(sv).size()) * 6.0f;
+    };
+    auto layout = state.buildLayout(360.0f, 180.0f, 4.0f, 1.0f, mono6);
+    CHECK(layout.visible);
+    CHECK(layout.rows.size() == 2);
+    CHECK_NEAR(layout.popupRect.y1, 180.0f - 15.0f, 0.01f);
+    CHECK_NEAR(layout.popupRect.height(), 24.0f, 0.01f);
+    // "/" is 6px at 4.0 -> token starts at 10.0, padLeft 1.0 -> x0 == 9.0, width == 8*6 + 1 + 2 = 51.0.
+    CHECK_NEAR(layout.popupRect.x0, 9.0f, 0.01f);
+    CHECK_NEAR(layout.popupRect.width(), 51.0f, 0.01f);
+    CHECK(layout.rows[0].selected);
+    CHECK(!layout.rows[1].selected);
+
+    auto hitRow1 = CommandSuggestionState::hitTestRow(
+        layout,
+        layout.popupRect.x0 + 5.0f,
+        layout.rows[1].rect.y0 + 3.0f
+    );
+    CHECK(hitRow1.has_value() && *hitRow1 == 1);
+    auto clicked = state.applyByClick(*hitRow1);
+    CHECK(clicked.has_value() && clicked->newText == "/gamerule" && clicked->refreshIntellisense);
+}
+
+void testSelectAllAndClipboardHelpers() {
+    using namespace javachat;
+
+    // End append
+    auto r1 = extractInsertedTextAfterSelectAll("/gamemode spectator", "/gamemode spectator/");
+    CHECK(r1.has_value() && *r1 == "/");
+
+    // Mid-string insertion
+    auto r2 = extractInsertedTextAfterSelectAll("/gamemode spectator", "/gameamode spectator");
+    CHECK(r2.has_value() && *r2 == "a");
+
+    // Start insertion with multibyte UTF-8 sharing lead bytes ("あ" E3 81 82 vs "い" E3 81 84)
+    auto r3 = extractInsertedTextAfterSelectAll("あ", "いあ");
+    CHECK(r3.has_value() && *r3 == "い");
+
+    // Multi-char Japanese IME commit
+    auto r4 = extractInsertedTextAfterSelectAll("hello", "helloこんにちは");
+    CHECK(r4.has_value() && *r4 == "こんにちは");
+
+    // Repeated chars
+    auto r5 = extractInsertedTextAfterSelectAll("aaa", "aaaa");
+    CHECK(r5.has_value() && *r5 == "a");
+
+    // Empty / non-growing / mismatched edits
+    CHECK(!extractInsertedTextAfterSelectAll("", "a").has_value());
+    CHECK(!extractInsertedTextAfterSelectAll("abc", "abc").has_value());
+    CHECK(!extractInsertedTextAfterSelectAll("abc", "ab").has_value());
+    CHECK(!extractInsertedTextAfterSelectAll("abc", "acbd").has_value());
+
+    // sanitizeClipboardForChat
+    CHECK(sanitizeClipboardForChat("/gamemode spectator\r\n") == "/gamemode spectator");
+    CHECK(sanitizeClipboardForChat("line1\r\nline2\n\ttabbed\r") == "line1 line2  tabbed");
+    CHECK(sanitizeClipboardForChat(std::string_view("a\x01\x1F" "b\x7F" "c", 6)) == "abc");
+    CHECK(sanitizeClipboardForChat("あいうえお", 3) == "あいう");
+}
+
+void testFastTypingSuggestionSyncAndKnownCommands() {
+    using namespace javachat;
+
+    CommandSuggestionState state;
+    std::vector<std::string> rootCmds{"ability - d0", "gamemode - d1", "gamerule - d2", "give - d3"};
+    state.syncFromBedrock("/", rootCmds, false);
+    CHECK(state.items().size() == 4);
+    CHECK(state.isKnownCommand("/gamemode"));
+    CHECK(state.isKnownCommand("/GIVE"));
+    // Partial prefix must NOT be treated as a complete known command!
+    CHECK(!state.isKnownCommand("/game"));
+
+    // Fast typing "/g" before Bedrock ticks (same stale rootCmds, intellisensePending == true)
+    state.syncFromBedrock("/g", rootCmds, true);
+    CHECK(state.items().size() == 3);
+    CHECK(state.selectedToken() == "gamemode");
+    CHECK(computeInlineGhostSuffix("/g", state.selectedToken()) == "amemode");
+
+    // Fast typing "/gi" -> narrows immediately to "give"
+    state.syncFromBedrock("/gi", rootCmds, true);
+    CHECK(state.items().size() == 1);
+    CHECK(state.selectedToken() == "give");
+    CHECK(computeInlineGhostSuffix("/gi", state.selectedToken()) == "ve");
+
+    // Known complete command "/give" stays gray even when pending intellisense hasn't sent usage yet
+    state.syncFromBedrock("/give", rootCmds, true);
+    CHECK(state.isKnownCommand("/give"));
+    CHECK(formatJavaCommandSyntax("/give", state.items(), false, state.isKnownCommand("/give")) == "\xC2\xA7" "7/give");
+
+    // Partial command "/game" stays red even with knownCommandValid == false
+    state.syncFromBedrock("/game", rootCmds, true);
+    CHECK(!state.isKnownCommand("/game"));
+    CHECK(
+        formatJavaCommandSyntax("/game", state.items(), false, state.isKnownCommand("/game"))
+        == "\xC2\xA7" "7/\xC2\xA7" "cgame"
+    );
+
+    // Crossing space into arg 1 while Bedrock still holds stale arg-0 list -> clear items immediately
+    std::vector<std::string> gmOnly{"gamemode - d1"};
+    state.syncFromBedrock("/gamemode", gmOnly, false);
+    state.syncFromBedrock("/gamemode ", gmOnly, true);
+    CHECK(state.items().empty());
+    CHECK(state.isKnownCommand("/gamemode "));
+    CHECK(
+        formatJavaCommandSyntax("/gamemode ", state.items(), false, state.isKnownCommand("/gamemode "))
+        == "\xC2\xA7" "7/gamemode "
+    );
+
+    // Bedrock tick delivers arg-1 suggestions
+    std::vector<std::string> gmModes{"adventure", "creative", "spectator", "survival"};
+    state.syncFromBedrock("/gamemode ", gmModes, false);
+    CHECK(state.items().size() == 4);
+    CHECK(state.items()[0] == "adventure");
+
+    // World switch clears known commands
+    state.clearKnownCommands();
+    CHECK(!state.isKnownCommand("/gamemode"));
+}
+
 } // namespace
 
 int main() {
@@ -534,6 +966,10 @@ int main() {
     testJsoncCommentsTrailingCommasAndSurrogates();
     testScrollAnchorAndScrollbarDrag();
     testMultiUrlPerLineExtraction();
+    testOptimizationNeedsSyncFontRevisionAndZeroFade();
+    testCommandSuggestions();
+    testSelectAllAndClipboardHelpers();
+    testFastTypingSuggestionSyncAndKnownCommands();
 
     std::cout << "==== " << gPassed << " passed, " << gFailed << " failed ====\n";
     return gFailed == 0 ? 0 : 1;

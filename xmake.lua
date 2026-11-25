@@ -55,7 +55,7 @@ target("JavaChat")
     add_rules("@levibuildscript/modpacker", {
         modName = "JavaChat",
         modFile = "JavaChat.dll",
-        modVersion = "1.0.0",
+        modVersion = "1.1.0",
         modPlatform = "client"
     })
     add_files("src/core/*.cpp", "src/mod/*.cpp")

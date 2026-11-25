@@ -24,6 +24,7 @@ public:
 
     bool        isHookInstalled() const noexcept { return mHookInstalled.load(std::memory_order_relaxed); }
     bool        isPinnedLastCompose() const noexcept { return mPinnedLast.load(std::memory_order_relaxed); }
+    bool        isPinned() const noexcept { return mPinnedLast.load(std::memory_order_relaxed); }
     bool        hasFailedLatch() const noexcept { return mFailedLatch.load(std::memory_order_relaxed); }
     std::string statusSummary() const;
 

@@ -1,17 +1,27 @@
 #include "mod/ChatCommands.h"
 
+#include <cctype>
 #include <string>
 
 #include <ll/api/command/CommandHandle.h>
 #include <ll/api/command/CommandRegistrar.h>
+#include <ll/api/command/EnumName.h>
+#include <ll/api/command/SoftEnum.h>
 
 #include <mc/server/commands/CommandOrigin.h>
 #include <mc/server/commands/CommandOutput.h>
 #include <mc/server/commands/CommandPermissionLevel.h>
 
+#include "mod/ChatFontManager.h"
 #include "mod/JavaChatMod.h"
 
 namespace javachat {
+
+enum class JchatFontSpec : int {};
+
+struct FontSpecParam {
+    ll::command::SoftEnum<JchatFontSpec> value;
+};
 
 struct FloatValueParam {
     float value;
@@ -29,6 +39,11 @@ struct HeightParam {
 struct PositionParam {
     float left;
     float bottom;
+};
+
+struct FadeParam {
+    float delay;
+    float duration;
 };
 
 void registerChatCommands(std::weak_ptr<ll::mod::Mod> weakMod) {
@@ -135,6 +150,60 @@ void registerChatCommands(std::weak_ptr<ll::mod::Mod> weakMod) {
         }
     );
 
+    cmd.overload<FadeParam>(weakMod).text("fade").required("delay").required("duration").execute(
+        [](CommandOrigin const&, CommandOutput& out, FadeParam const& p) {
+            auto [d, dur] = JavaChatMod::instance().setFade(p.delay, p.duration);
+            out.success("JavaChat: fadeDelaySec = {:.1f}, fadeDurationSec = {:.2f}", d, dur);
+        }
+    );
+
+    cmd.overload(weakMod).text("font").execute([](CommandOrigin const&, CommandOutput& out) {
+        out.success("{}", JavaChatMod::instance().describeFonts());
+    });
+
+    std::string const fontEnumName = ll::command::enum_name_v<JchatFontSpec>;
+    auto              fontVals     = ChatFontManager::instance().completionCandidates();
+    if (registrar.hasSoftEnum(fontEnumName)) registrar.setSoftEnumValues(fontEnumName, fontVals);
+    else registrar.tryRegisterSoftEnum(fontEnumName, fontVals);
+
+    cmd.overload<FontSpecParam>(weakMod).text("font").required("value").execute(
+        [](CommandOrigin const&, CommandOutput& out, FontSpecParam const& p) {
+            std::string raw(p.value);
+            while (!raw.empty() && (raw.front() == ' ' || raw.front() == '\t')) raw.erase(raw.begin());
+            while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t')) raw.pop_back();
+            std::string lo = raw;
+            for (char& c : lo) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (lo.empty() || lo == "list") {
+                out.success("{}", JavaChatMod::instance().describeFonts());
+                return;
+            }
+            std::string msg;
+            if (JavaChatMod::instance().setFont(raw, msg)) out.success("{}", msg);
+            else out.error("{}", msg);
+        }
+    );
+
+    cmd.overload<BoolValueParam>(weakMod).text("autoclose").required("value").execute(
+        [](CommandOrigin const&, CommandOutput& out, BoolValueParam const& p) {
+            JavaChatMod::instance().setAutoCloseOnSend(p.value);
+            out.success("JavaChat: autoCloseOnSend = {}", p.value ? "true" : "false");
+        }
+    );
+
+    cmd.overload<BoolValueParam>(weakMod).text("animations").required("value").execute(
+        [](CommandOrigin const&, CommandOutput& out, BoolValueParam const& p) {
+            JavaChatMod::instance().setDisableChatAnimations(!p.value);
+            out.success("JavaChat: chat animations = {}", p.value ? "on" : "off (Java Edition style)");
+        }
+    );
+
+    cmd.overload<BoolValueParam>(weakMod).text("keephud").required("value").execute(
+        [](CommandOrigin const&, CommandOutput& out, BoolValueParam const& p) {
+            JavaChatMod::instance().setKeepHudVisibleInChat(p.value);
+            out.success("JavaChat: keepHudVisibleInChat = {}", p.value ? "true" : "false");
+        }
+    );
+
     cmd.overload<BoolValueParam>(weakMod).text("shadow").required("value").execute(
         [](CommandOrigin const&, CommandOutput& out, BoolValueParam const& p) {
             JavaChatMod::instance().setTextShadow(p.value);
@@ -167,6 +236,13 @@ void registerChatCommands(std::weak_ptr<ll::mod::Mod> weakMod) {
         [](CommandOrigin const&, CommandOutput& out, BoolValueParam const& p) {
             JavaChatMod::instance().setClickToOpenUrl(p.value);
             out.success("JavaChat: clickToOpenUrl = {}", p.value ? "true" : "false");
+        }
+    );
+
+    cmd.overload<BoolValueParam>(weakMod).text("clearonswitch").required("value").execute(
+        [](CommandOrigin const&, CommandOutput& out, BoolValueParam const& p) {
+            JavaChatMod::instance().setClearHistoryOnWorldSwitch(p.value);
+            out.success("JavaChat: clearHistoryOnWorldSwitch = {}", p.value ? "true" : "false");
         }
     );
 }

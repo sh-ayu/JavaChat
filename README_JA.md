@@ -13,19 +13,27 @@ Minecraft Bedrock（統合版 / Windows x64）の重いチャット画面を、*
 統合版で `T` や `/` を押すたびに重くなる最大の理由は、バニラの `chat_screen.json` が毎回「大量の履歴スクロールリスト・ヘッダー・ホストメニュー・設定ポップアップ・（マルチサーバーでは独自サイドバー）」を再生成・レイアウト計算しているためです。
 
 JavaChat では役割を明確に分離しています：
-1. **超軽量 JSON-UI（同梱パック `JavaChatUI`）**: 重い履歴パネルやヘッダー・サイドバーをすべて取り除き、**高さ 14px の Java 風 1 行入力欄とコンパクトなコマンド補完ポップアップだけ**を残します。バニラ左上の HUD チャットも非表示化します（座標表示やペーパードールには影響しません）。
-2. **C++ オーバーレイ描画（`MinecraftUIRenderContext`）**: `GuiData::mGuiMessages` からメッセージを差分同期し、折り返しキャッシュ（`Font::getLineLength`）付きで左下に描画します。入力欄自体はバニラのものを使うため、**日本語 IME 変換・コピペ・コマンド Tab 補完・上下キーの送信履歴はバニラ品質のまま**維持されます。
+1. **超軽量 JSON-UI（同梱パック `JavaChatUI`）**: 重い履歴パネル・ヘッダー・サイドバー・統合版既定の補完リストを取り除き、**高さ 12px の本家 Java 風 1 行入力欄だけ**を残します。バニラ左上の HUD チャットも非表示化します（座標表示やペーパードールには影響しません）。
+2. **C++ オーバーレイ描画（`MinecraftUIRenderContext` & `TextComponent`）**: `GuiData::mGuiMessages` からメッセージを差分同期し、折り返しキャッシュ（`Font::getLineLength`）付きで左下に描画します。さらに本家 Java Edition 準拠の**コマンド補完ポップアップ**（トークン名のみ・幅自動フィット・黄色選択 `#FFFF55`・↑/↓ やホイール・クリック・Tab 循環対応）、**入力欄の灰色インライン補完プレビュー**、**コマンド構文カラー表示**、**日本語 IME 変換の完全維持**を実現しています。
 
 ---
 
 ## 主な機能
 
 - **本家 Java Edition に忠実な見た目と操作感**
-  - 左下に純黒の半透明帯（既定不透明度 `0.38`）＋影付きテキスト。枠線や余計な装飾なし。
-  - チャットを開いた状態・閉じた状態とも同じ下端位置（既定 `bottomOffset: 40.0`、ホットバーや体力バーの上）で揃い、開閉しても上下にズレません。
+  - 左下に純黒の半透明帯（既定 `backgroundOpacity: 0.50`、`lineSpacing: 0.0` で 9px 詰め表示）＋影付きテキスト。枠線や余計な装飾なし。
+  - チャットを開いた状態・閉じた状態とも同じ下端位置（既定 `bottomOffset: 40.0`、ホットバーや体力バーの上）で揃い、補完ポップアップが開いてもチャット履歴は上下に跳ねず、補完ボックスが自然な Z 順で前面に表示されます。
+  - **本家仕様の 12px 入力欄＆構文ハイライト**: `/` 入力時にコマンド構文カラー（有効コマンドは灰色、未完成・不正コマンドは赤 `#FF5555`、以降の引数は Java 版 Brigadier の 5 色ローテーション：水色/黄/緑/薄紫/金）、薄い灰色のインライン補完プレビュー、`_` / `|` カーソルに加え、**`Ctrl+A` 全選択編集**（選択ハイライト・`Ctrl+C`/`Ctrl+X`/`Ctrl+V`・`Backspace`/`Delete`・上書き入力＆日本語 IME 置換）に対応しています。
+  - **本家仕様のコマンド補完ポップアップ**: `- 説明文` やアイコン余白を除いたトークン名のみを、入力中トークン直上に幅自動フィットで表示（選択中 `#FFFF55` 黄色・非選択 `#AAAAAA` 灰色）。補完表示中は `↑`/`↓`・`Tab`/`Shift+Tab`・マウスホバー・クリック・ホイールで操作でき、補完が閉じている時は `↑`/`↓` で送信履歴を辿れます。
   - チャットを開いても画面全体が暗転しません。
+  - **ワールド・サーバー切り替え時の履歴クリア**: サーバーやワールドを移動した際に前の履歴を残さず自動でクリアします（`clearHistoryOnWorldSwitch`）。
   - **Esc キー 1 回で即閉じ**: 入力欄のフォーカス解除だけで止まらず、1 回の Esc でチャット画面を閉じられます。
-  - **コマンド補完との重なりゼロ**: チャット履歴を `BeforeUIRenderEvent` で JSON-UI より奥に描画し、補完候補がチャットの高さまで伸びてきた場合だけ自動で上へ避けます。
+  - **送信後に自動で閉じる**: チャットやコマンドを送信すると本家 Java Edition 同様に自動でチャット画面を閉じます（日本語 IME の変換確定 Enter では誤爆しません、`autoCloseOnSend`）。
+  - **開閉アニメーション完全撤廃**: 画面のスライド／フェード遷移やローディングバーを無効化し、0ms で即時開閉します（`disableChatAnimations`）。
+  - **チャット中も HUD・他 MOD の HUD を維持**: チャットを開いている間もバニラ HUD（ホットバー・座標・ペーパードール等）や他 MOD の HUD オーバーレイを表示したままにします（`keepHudVisibleInChat`）。
+- **フォント変更（履歴＋入力欄＋補完欄連動）**:
+  - Bedrock 内蔵フォント（`default` / `smooth` / `unicode` / `MinecraftTen` / `rune` / `SmoothSmall`）をコマンドで即座に切り替えられます。
+  - 任意の `.ttf` ファイル（フルパス／`config/fonts/`／Windows フォント名）にも対応し、`.ttf` 側に未収録の文字（日本語など）がある行は自動で `default` フォントへフォールバックします（※新しい `.ttf` の反映にはゲーム再起動が必要です）。
 - **履歴拡張と快適なスクロール**
   - 既定 **500 件**（最大 `5000` 件）まで履歴を保持。
   - **マウスホイール**（`Shift + ホイール` で 1 行ずつ）、**`PageUp` / `PageDown`**、**`Ctrl+Home` / `Ctrl+End`**、さらに**スクロールバーのクリック／ドラッグ**に対応。
@@ -45,7 +53,7 @@ JavaChat では役割を明確に分離しています：
 ## 導入方法
 
 ### 方法 1: `lip` / LeviLauncher から導入
-リポジトリに [`tooth.json`](tooth.json) を同梱しているため、`lip` / LeviLauncher のパッケージ導入が使える環境では以下のコマンドでインストールできます：
+リポジトリに [`lip.toml`](lip.toml)（format 4、現行 `lip`・LeviMC Mods 掲載対応）および互換用の [`tooth.json`](tooth.json) を同梱しているため、`lip` / LeviLauncher のパッケージ導入が使える環境では以下のコマンドでインストールできます：
 
 ```powershell
 lip install github.com/sh-ayu/JavaChat
@@ -88,14 +96,21 @@ lip install github.com/sh-ayu/JavaChat
 | `/jchat position <left> <bottom>` | 左端オフセット（`0..240`）と下端オフセット（`18..240`）を変更 |
 | `/jchat scale <0.5..2.0>` | 文字サイズ倍率を変更 |
 | `/jchat spacing <0..8>` | 行間（px）を変更 |
+| `/jchat font` / `/jchat font list` | 現在のフォント・内蔵プリセット・`config/fonts/*.ttf` 一覧を表示 |
+| `/jchat font <名前またはパス>` | 内蔵フォント（即時反映）または `.ttf` フォント（再起動で反映）へ変更 |
 | `/jchat opacity <0..1>` | 背景の不透明度を変更 |
 | `/jchat textopacity <0.1..1>` | 文字の不透明度を変更 |
 | `/jchat fade <1..120>` | 閉じた状態でフェードアウトし始めるまでの秒数を変更 |
+| `/jchat fade <delay> <duration>` | フェード開始秒数（`1..120`）とフェード時間（`0..10`秒、`0` で即消し）を変更 |
+| `/jchat autoclose <true\|false>` | 送信後の自動クローズの ON / OFF |
+| `/jchat animations <true\|false>` | チャット開閉アニメーションの ON / OFF（`false` が本家準拠） |
+| `/jchat keephud <true\|false>` | チャットを開いている間のバニラ HUD・他 MOD HUD 表示の ON / OFF |
 | `/jchat shadow <true\|false>` | 文字の影の ON / OFF |
 | `/jchat compact <true\|false>` | 連続重複まとめ `[xN]` の ON / OFF |
 | `/jchat timestamps <true\|false>` | `[HH:MM]` タイムスタンプの ON / OFF |
 | `/jchat clickcopy <true\|false>` | クリックコピーの ON / OFF |
 | `/jchat clickurl <true\|false>` | URL クリック起動の ON / OFF |
+| `/jchat clearonswitch <true\|false>` | ワールド・サーバー切り替え時の履歴クリアの ON / OFF |
 
 ---
 
@@ -113,19 +128,23 @@ lip install github.com/sh-ayu/JavaChat
 | `bottomOffset` | `40.0` | 下端からの距離（開閉共通、`18`〜`240`） |
 | `leftOffset` | `2.0` | 左端からの距離（`0`〜`240`） |
 | `fontScale` | `1.0` | フォント倍率（`0.5`〜`2.0`） |
-| `lineSpacing` | `1.5` | 行間（`0.0`〜`8.0`） |
-| `backgroundOpacity` | `0.38` | メッセージ背景の不透明度（`0.0`〜`1.0`） |
+| `lineSpacing` | `0.0` | 行間（`0.0`〜`8.0`） |
+| `backgroundOpacity` | `0.50` | メッセージ背景の不透明度（`0.0`〜`1.0`） |
 | `textOpacity` | `1.0` | 文字の不透明度（`0.1`〜`1.0`） |
 | `textShadow` | `true` | 文字の影を描画するか |
 | `fadeDelaySec` | `9.0` | フェード開始までの表示時間（秒、`1`〜`120`） |
-| `fadeDurationSec` | `1.0` | フェードアウトにかかる時間（秒、`0.1`〜`10`） |
+| `fadeDurationSec` | `1.0` | フェードアウトにかかる時間（秒、`0.0`〜`10`、`0` でフェードなし即消し） |
 | `maxHistoryMessages` | `500` | 保持する履歴件数上限（`20`〜`5000`） |
 | `scrollStepLines` | `3` | ホイール 1 ノッチあたりのスクロール行数（`1`〜`20`） |
 | `compactDuplicates` | `true` | 連続する同一メッセージを `[xN]` にまとめる |
 | `showTimestamps` | `false` | 先頭に `[HH:MM]` を表示 |
 | `clickToCopy` | `true` | メッセージクリックでコピー |
 | `clickToOpenUrl` | `true` | `http://` / `https://` リンクの左クリックでブラウザを開く |
-| `clearHistoryOnWorldSwitch` | `false` | ワールド・サーバー切り替え時に履歴を消去 |
+| `autoCloseOnSend` | `true` | メッセージ／コマンド送信後にチャット画面を自動で閉じる |
+| `disableChatAnimations` | `true` | チャット開閉時のスライド／フェードアニメーションを無効化 |
+| `keepHudVisibleInChat` | `true` | チャットを開いている間も `hud_screen` や他 MOD の HUD を維持 |
+| `font` | `"default"` | 内蔵フォント（`default`/`smooth`/`unicode`/`MinecraftTen`/`rune`/`SmoothSmall`）または `.ttf` パス／ファイル名 |
+| `clearHistoryOnWorldSwitch` | `true` | ワールド・サーバー切り替え時に履歴を消去 |
 | `verboseLog` | `false` | 詳細ログを出力 |
 
 ---

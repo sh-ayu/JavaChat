@@ -30,6 +30,11 @@ struct GuiMessageSnapshot {
     int         messageType = 0;
 };
 
+struct CachedWrappedLine {
+    std::string                text;
+    std::optional<std::string> lineUrl;
+};
+
 struct ChatEntry {
     uint64_t                   id            = 0;
     std::string                rawText;        // Original formatted text (with § codes)
@@ -40,13 +45,14 @@ struct ChatEntry {
     int                        repeatCount   = 1;
     int                        messageType   = 0;
 
-    // Per-entry wrapped line cache (invalidated when layout/display parameters change).
-    mutable std::vector<std::string> cachedWrappedLines;
-    mutable float                    cachedMaxWidth      = -1.0f;
-    mutable float                    cachedFontScale     = -1.0f;
-    mutable int                      cachedRepeatCount   = -1;
-    mutable bool                     cachedTimestamps    = false;
-    mutable bool                     cachedCompact       = false;
+    // Per-entry wrapped line cache (invalidated when layout/display/font parameters change).
+    mutable std::vector<CachedWrappedLine> cachedWrappedLines;
+    mutable float                          cachedMaxWidth      = -1.0f;
+    mutable float                          cachedFontScale     = -1.0f;
+    mutable int                            cachedRepeatCount   = -1;
+    mutable uint32_t                       cachedFontRevision  = 0;
+    mutable bool                           cachedTimestamps    = false;
+    mutable bool                           cachedCompact       = false;
 };
 
 struct RenderedChatLine {
@@ -74,6 +80,20 @@ struct ChatViewLayout {
 
 class ChatHistory {
 public:
+    // O(1) fast-path check to skip full GuiMessage copying on unchanged frames.
+    bool needsSync(
+        size_t           currentCount,
+        std::string_view firstFull,
+        int              firstType,
+        std::string_view lastFull,
+        int              lastType,
+        float            lastDuration,
+        double           nowSec
+    ) const noexcept;
+
+    // True if at least one entry would still be visible in closed HUD mode at `nowSec`.
+    bool hasVisibleClosedMessages(double nowSec, ChatConfig const& cfg) const noexcept;
+
     // Synchronize incoming snapshots from GuiData::mGuiMessages.
     // Returns the number of newly ingested messages.
     size_t syncFromGuiMessages(
@@ -123,7 +143,8 @@ public:
         double               nowSec,
         ChatConfig const&    cfg,
         TextMeasureFn const& measure,
-        float                bottomOffsetOverride = -1.0f
+        float                bottomOffsetOverride = -1.0f,
+        uint32_t             fontRevision         = 0
     );
 
     // Return the index in `view.lines` containing (mx, my), or std::nullopt.

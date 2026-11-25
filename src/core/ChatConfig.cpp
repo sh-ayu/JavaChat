@@ -263,11 +263,84 @@ std::string formatFloat(float v) {
     return out;
 }
 
+std::string_view trimAsciiWs(std::string_view sv) noexcept {
+    while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' || sv.front() == '\n')) {
+        sv.remove_prefix(1);
+    }
+    while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r' || sv.back() == '\n')) {
+        sv.remove_suffix(1);
+    }
+    return sv;
+}
+
+std::string toLowerAscii(std::string_view sv) {
+    std::string out;
+    out.reserve(sv.size());
+    for (char c : sv) {
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return out;
+}
+
+std::string escapeJsonString(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+        case '"':  out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20) {
+                char buf[8]{};
+                std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+                out += buf;
+            } else {
+                out.push_back(static_cast<char>(c));
+            }
+            break;
+        }
+    }
+    return out;
+}
+
 } // namespace
+
+bool isBuiltinFontName(std::string_view name, std::string* canonicalOut) noexcept {
+    try {
+        std::string lo = toLowerAscii(trimAsciiWs(name));
+        char const* canonical = nullptr;
+        if (lo == "default" || lo == "mojangles") {
+            canonical = "default";
+        } else if (lo == "ui") {
+            canonical = "ui";
+        } else if (lo == "smooth") {
+            canonical = "smooth";
+        } else if (lo == "unicode") {
+            canonical = "unicode";
+        } else if (lo == "minecraftten" || lo == "mc10") {
+            canonical = "MinecraftTen";
+        } else if (lo == "rune") {
+            canonical = "rune";
+        } else if (lo == "smoothsmall") {
+            canonical = "SmoothSmall";
+        } else {
+            return false;
+        }
+        if (canonicalOut) *canonicalOut = canonical;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 void sanitizeConfig(ChatConfig& cfg) noexcept {
     ChatConfig def;
-    cfg.version            = 1;
+    cfg.version            = 3;
     cfg.width              = clampFinite(cfg.width, 120.0f, 640.0f, def.width);
     cfg.closedHeight       = clampFinite(cfg.closedHeight, 24.0f, 360.0f, def.closedHeight);
     cfg.openHeight         = clampFinite(cfg.openHeight, 40.0f, 480.0f, def.openHeight);
@@ -279,12 +352,29 @@ void sanitizeConfig(ChatConfig& cfg) noexcept {
     cfg.backgroundOpacity  = clampFinite(cfg.backgroundOpacity, 0.0f, 1.0f, def.backgroundOpacity);
     cfg.textOpacity        = clampFinite(cfg.textOpacity, 0.1f, 1.0f, def.textOpacity);
     cfg.fadeDelaySec       = clampFinite(cfg.fadeDelaySec, 1.0f, 120.0f, def.fadeDelaySec);
-    cfg.fadeDurationSec    = clampFinite(cfg.fadeDurationSec, 0.1f, 10.0f, def.fadeDurationSec);
+    cfg.fadeDurationSec    = clampFinite(cfg.fadeDurationSec, 0.0f, 10.0f, def.fadeDurationSec);
     cfg.maxHistoryMessages = std::clamp(cfg.maxHistoryMessages, 20, 5000);
     cfg.scrollStepLines    = std::clamp(cfg.scrollStepLines, 1, 20);
+    try {
+        std::string_view trimmed = trimAsciiWs(cfg.font);
+        if (trimmed.empty()) {
+            cfg.font = def.font;
+        } else {
+            std::string canonical;
+            if (isBuiltinFontName(trimmed, &canonical)) {
+                cfg.font = std::move(canonical);
+            } else if (trimmed.size() != cfg.font.size()) {
+                cfg.font.assign(trimmed);
+            }
+        }
+    } catch (...) {
+        cfg.font = "default";
+    }
 }
 
-bool parseConfigJson(std::string_view jsonText, ChatConfig& outConfig, std::string* outWarning) {
+bool parseConfigJson(std::string_view jsonText, ChatConfig& outConfig, std::string* outWarning, bool* outMigrated) {
+    if (outMigrated) *outMigrated = false;
+
     // Strip UTF-8 BOM if present.
     if (jsonText.size() >= 3 && static_cast<unsigned char>(jsonText[0]) == 0xEF
         && static_cast<unsigned char>(jsonText[1]) == 0xBB
@@ -299,6 +389,8 @@ bool parseConfigJson(std::string_view jsonText, ChatConfig& outConfig, std::stri
     }
 
     ChatConfig cfg;
+    bool       hasVersion    = false;
+    int        parsedVersion = 0;
     std::vector<std::string> warnings;
     p.skipWs();
     if (!p.consume('}')) {
@@ -323,6 +415,10 @@ bool parseConfigJson(std::string_view jsonText, ChatConfig& outConfig, std::stri
                 if (kind == 'b') dst = (val == "true");
                 else warnings.push_back(key + " expects bool");
             };
+            auto readString = [&](std::string& dst) {
+                if (kind == 's') dst = val;
+                else warnings.push_back(key + " expects string");
+            };
             auto readFloat = [&](float& dst) {
                 if (kind == 'n') {
                     try {
@@ -346,8 +442,13 @@ bool parseConfigJson(std::string_view jsonText, ChatConfig& outConfig, std::stri
                 }
             };
 
-            if (key == "version") readInt(cfg.version);
-            else if (key == "enabled") readBool(cfg.enabled);
+            if (key == "version") {
+                readInt(cfg.version);
+                if (kind == 'n') {
+                    hasVersion    = true;
+                    parsedVersion = cfg.version;
+                }
+            } else if (key == "enabled") readBool(cfg.enabled);
             else if (key == "overrideServerChatUi") readBool(cfg.overrideServerChatUi);
             else if (key == "width") readFloat(cfg.width);
             else if (key == "closedHeight") readFloat(cfg.closedHeight);
@@ -367,6 +468,10 @@ bool parseConfigJson(std::string_view jsonText, ChatConfig& outConfig, std::stri
             else if (key == "showTimestamps") readBool(cfg.showTimestamps);
             else if (key == "clickToCopy") readBool(cfg.clickToCopy);
             else if (key == "clickToOpenUrl") readBool(cfg.clickToOpenUrl);
+            else if (key == "autoCloseOnSend") readBool(cfg.autoCloseOnSend);
+            else if (key == "disableChatAnimations") readBool(cfg.disableChatAnimations);
+            else if (key == "keepHudVisibleInChat") readBool(cfg.keepHudVisibleInChat);
+            else if (key == "font") readString(cfg.font);
             else if (key == "clearHistoryOnWorldSwitch") readBool(cfg.clearHistoryOnWorldSwitch);
             else if (key == "verboseLog") readBool(cfg.verboseLog);
 
@@ -384,6 +489,23 @@ bool parseConfigJson(std::string_view jsonText, ChatConfig& outConfig, std::stri
     if (p.hasError || p.pos != p.s.size()) {
         if (outWarning) *outWarning = p.hasError ? "unterminated comment in config JSON" : "unexpected trailing data in config JSON";
         return false;
+    }
+
+    if (hasVersion && parsedVersion < 2) {
+        if (!cfg.clearHistoryOnWorldSwitch) {
+            cfg.clearHistoryOnWorldSwitch = true;
+        }
+        if (outMigrated) *outMigrated = true;
+    }
+
+    if (hasVersion && parsedVersion < 3) {
+        if (std::fabs(cfg.lineSpacing - 1.5f) < 0.01f) {
+            cfg.lineSpacing = 0.0f;
+        }
+        if (std::fabs(cfg.backgroundOpacity - 0.38f) < 0.01f) {
+            cfg.backgroundOpacity = 0.50f;
+        }
+        if (outMigrated) *outMigrated = true;
     }
 
     sanitizeConfig(cfg);
@@ -427,6 +549,10 @@ std::string serializeConfigJson(ChatConfig const& rawCfg) {
         << "  \"showTimestamps\": " << b(cfg.showTimestamps) << ",\n"
         << "  \"clickToCopy\": " << b(cfg.clickToCopy) << ",\n"
         << "  \"clickToOpenUrl\": " << b(cfg.clickToOpenUrl) << ",\n"
+        << "  \"autoCloseOnSend\": " << b(cfg.autoCloseOnSend) << ",\n"
+        << "  \"disableChatAnimations\": " << b(cfg.disableChatAnimations) << ",\n"
+        << "  \"keepHudVisibleInChat\": " << b(cfg.keepHudVisibleInChat) << ",\n"
+        << "  \"font\": \"" << escapeJsonString(cfg.font) << "\",\n"
         << "  \"clearHistoryOnWorldSwitch\": " << b(cfg.clearHistoryOnWorldSwitch) << ",\n"
         << "  \"verboseLog\": " << b(cfg.verboseLog) << "\n"
         << "}\n";
@@ -451,7 +577,7 @@ ConfigLoadResult loadConfigFile(std::filesystem::path const& path) {
 
     ChatConfig  parsed;
     std::string warn;
-    if (!parseConfigJson(content, parsed, &warn)) {
+    if (!parseConfigJson(content, parsed, &warn, &res.migrated)) {
         res.corrupted = true;
         res.warning   = warn.empty() ? "malformed JSON" : warn;
         auto stamp    = std::chrono::duration_cast<std::chrono::seconds>(

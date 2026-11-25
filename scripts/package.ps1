@@ -8,6 +8,7 @@ $repoRoot     = Split-Path -Parent $PSScriptRoot
 $binDir       = Join-Path $repoRoot "bin\JavaChat"
 $manifestPath = Join-Path $repoRoot "manifest.json"
 $toothPath    = Join-Path $repoRoot "tooth.json"
+$lipPath      = Join-Path $repoRoot "lip.toml"
 $manifest     = Get-Content $manifestPath -Raw | ConvertFrom-Json
 $version      = $manifest.version
 
@@ -17,6 +18,16 @@ if (!(Test-Path $toothPath)) {
 $tooth = Get-Content $toothPath -Raw | ConvertFrom-Json
 if ($tooth.version -ne $version) {
     throw "Version mismatch: manifest.json ($version) != tooth.json ($($tooth.version))"
+}
+if (!(Test-Path $lipPath)) {
+    throw "Missing required lip manifest: $lipPath"
+}
+$lipRaw = Get-Content $lipPath -Raw
+if ($lipRaw -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+    throw "Missing version in lip.toml: $lipPath"
+}
+if ($Matches[1] -ne $version) {
+    throw "Version mismatch: manifest.json ($version) != lip.toml ($($Matches[1]))"
 }
 
 $requiredFiles = @(

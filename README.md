@@ -13,19 +13,27 @@ A lightweight **LeviLamina client mod** for **Minecraft Bedrock Edition** (Windo
 Opening chat in Bedrock Edition often stutters because `chat_screen.json` rebuilds a large scrollable message stack, header bar, host command panels, chat settings popups, and sometimes heavy server-provided sidebars every time you press `T` or `/`.
 
 JavaChat splits the work cleanly:
-1. **Ultra-light JSON-UI (`JavaChatUI` bundled pack)**: Strips `messages_scrolling_panel`, `chat_header`, `host_main_panel`, and `popup_factory`, leaving only a clean 14px Java-style bottom input bar and a clipped command autocomplete popup. It also hides vanilla's top-left HUD chat (`hud_screen.json`) without affecting coordinates or the paper doll.
-2. **Native C++ Overlay (`MinecraftUIRenderContext`)**: Captures incoming messages from `GuiData::mGuiMessages` and renders the bottom-left chat history with cached UTF-8 word-wrapping (`Font::getLineLength`), smooth fade-out, and zero-lag scrolling—while keeping Bedrock's native **IME input, clipboard, command Tab completion, and arrow-key input history** completely intact.
+1. **Ultra-light JSON-UI (`JavaChatUI` bundled pack)**: Strips `messages_scrolling_panel`, `chat_header`, `host_main_panel`, `auto_complete_panel`, and `popup_factory`, leaving only a slim **12px Java-style bottom input bar** while keeping vanilla's IME, clipboard, and intellisense data intact. It also hides vanilla's top-left HUD chat (`hud_screen.json`) without affecting coordinates or the paper doll.
+2. **Native C++ Overlay (`MinecraftUIRenderContext` & `TextComponent`)**: Captures incoming messages from `GuiData::mGuiMessages` and renders the bottom-left chat history with cached UTF-8 word-wrapping (`Font::getLineLength`), smooth fade-out, and zero-lag scrolling, plus an authentic **Java Edition command suggestions popup** (`#FFFF55` yellow selection, token-only narrow box aligned to the active argument, `↑`/`↓` + wheel/click/Tab cycling), **pale-gray inline ghost completion**, and **Brigadier command syntax coloring** inside the input bar.
 
 ---
 
 ## Features
 
 - **Authentic Java Edition look & feel**:
-  - Bottom-left translucent pure-black message strips (`backgroundOpacity: 0.38` by default) with drop-shadowed text—no distracting borders or extra sidebars.
-  - Consistent vertical alignment (`bottomOffset: 40.0` above the hotbar/status bar) whether chat is open or closed, with zero jump when toggling chat.
+  - Bottom-left translucent pure-black message strips (`backgroundOpacity: 0.50`, `lineSpacing: 0.0` for crisp 9px rows at 1.0x scale) with drop-shadowed text—no distracting borders or extra sidebars.
+  - Consistent vertical alignment (`bottomOffset: 40.0` above the hotbar/status bar) whether chat is open or closed, with zero jump when opening chat or showing command suggestions (suggestions render cleanly in front of chat history just like Java Edition).
+  - Authentic 12px command/chat input bar with Brigadier syntax coloring (`/` and valid command names gray, incomplete/unknown command names red, subsequent arguments cycling Java's 5-color palette: aqua/yellow/green/light-purple/gold), pale-gray inline ghost completion, `_` / `|` caret, and full **`Ctrl+A` select-all editing** (`Ctrl+A`, `Ctrl+C`, `Ctrl+X`, `Ctrl+V`, `Backspace`/`Delete`, direct typing & IME replacement).
+  - Narrow content-fitted command suggestions popup aligned directly above the active token, displaying tokens only (`#FFFF55` yellow selected, `#AAAAAA` gray unselected) with `↑`/`↓`, `Tab`/`Shift+Tab`, mouse hover, click, and wheel scrolling.
   - Transparent backdrop when chat is open (no full-screen dimming).
+  - **Auto-clear on world/server switch**: Clears stale chat history from previous servers when joining or leaving a world (`clearHistoryOnWorldSwitch`).
   - **Single-`Esc` close**: Pressing `Esc` once closes chat immediately instead of only deselecting the text box.
-  - **Autocomplete collision avoidance**: Chat history layers behind JSON-UI (`BeforeUIRenderEvent`) and automatically slides above tall active command suggestions so text never overlaps.
+  - **Auto-close on send**: Sending a chat message or command automatically closes chat just like Java Edition, without misfiring on IME composition `Enter` (`autoCloseOnSend`).
+  - **Zero open/close animations**: Removes Bedrock's screen slide/fade animations and loading bars so chat opens and closes instantaneously (`disableChatAnimations`).
+  - **Keep HUD visible in chat**: Keeps vanilla HUD and other client mods' HUD overlays visible while typing in chat (`keepHudVisibleInChat`).
+- **Custom & built-in font switching**:
+  - Switch live between Bedrock built-in fonts (`default`, `smooth`, `unicode`, `MinecraftTen`, `rune`, `SmoothSmall`) across the chat overlay, input bar, and autocomplete suggestions.
+  - Load custom `.ttf` files by path, from `config/fonts/`, or from Windows Fonts (`C:\Windows\Fonts`), with automatic fallback for missing glyphs (restart game to apply newly staged `.ttf` files).
 - **Expanded history & smooth navigation**:
   - Keeps up to **500** messages by default (configurable `20`–`5000`).
   - Scroll with **Mouse Wheel** (`Shift + Wheel` for 1-line steps), **`PageUp` / `PageDown`**, **`Ctrl+Home` / `Ctrl+End`**, or by **clicking / dragging the scrollbar**.
@@ -45,7 +53,7 @@ JavaChat splits the work cleanly:
 ## Installation
 
 ### Option 1: Using `lip` / LeviLauncher
-This repository ships a [`tooth.json`](tooth.json) manifest, so you can install it where `lip` / LeviLauncher package installation is available:
+This repository ships both [`lip.toml`](lip.toml) (format 4, for modern `lip` and LeviMC Mods discovery) and [`tooth.json`](tooth.json) (legacy compatibility), so you can install it where `lip` / LeviLauncher package installation is available:
 
 ```powershell
 lip install github.com/sh-ayu/JavaChat
@@ -88,14 +96,21 @@ All settings can be adjusted live in-game and are saved automatically to `config
 | `/jchat position <left> <bottom>` | Set `leftOffset` (`0..240`) and `bottomOffset` (`18..240`) |
 | `/jchat scale <0.5..2.0>` | Set text font scale |
 | `/jchat spacing <0..8>` | Set extra spacing between lines |
+| `/jchat font` / `/jchat font list` | Show current font, built-in presets, and `config/fonts/*.ttf` |
+| `/jchat font <nameOrPath>` | Switch to a built-in font (instant) or stage a `.ttf` font (restart to apply) |
 | `/jchat opacity <0..1>` | Set message background opacity |
 | `/jchat textopacity <0.1..1>` | Set text opacity |
 | `/jchat fade <1..120>` | Set HUD fade delay in seconds |
+| `/jchat fade <delay> <duration>` | Set HUD fade delay (`1..120`s) and fade duration (`0..10`s, `0` = instant) |
+| `/jchat autoclose <true\|false>` | Toggle auto-closing chat after sending a message |
+| `/jchat animations <true\|false>` | Toggle chat open/close animations (`false` = Java-style instant) |
+| `/jchat keephud <true\|false>` | Keep vanilla HUD & other mods' HUD visible while chat is open |
 | `/jchat shadow <true\|false>` | Toggle text drop shadow |
 | `/jchat compact <true\|false>` | Toggle consecutive duplicate `[xN]` compaction |
 | `/jchat timestamps <true\|false>` | Toggle `[HH:MM]` timestamps |
 | `/jchat clickcopy <true\|false>` | Toggle click-to-copy |
 | `/jchat clickurl <true\|false>` | Toggle click-to-open `http(s)` URLs |
+| `/jchat clearonswitch <true\|false>` | Toggle clearing chat history when switching worlds/servers |
 
 ---
 
@@ -113,19 +128,23 @@ Supports standard JSON as well as `//` line comments, `/* ... */` block comments
 | `bottomOffset` | `40.0` | Distance from bottom edge (`18`–`240`) |
 | `leftOffset` | `2.0` | Distance from left edge (`0`–`240`) |
 | `fontScale` | `1.0` | Chat text scale (`0.5`–`2.0`) |
-| `lineSpacing` | `1.5` | Extra vertical spacing per line (`0.0`–`8.0`) |
-| `backgroundOpacity` | `0.38` | Background alpha for message strips (`0.0`–`1.0`) |
+| `lineSpacing` | `0.0` | Extra vertical spacing per line (`0.0`–`8.0`) |
+| `backgroundOpacity` | `0.50` | Background alpha for message strips (`0.0`–`1.0`) |
 | `textOpacity` | `1.0` | Text alpha (`0.1`–`1.0`) |
 | `textShadow` | `true` | Render drop shadows under chat text |
 | `fadeDelaySec` | `9.0` | Seconds before closed HUD messages begin fading (`1`–`120`) |
-| `fadeDurationSec` | `1.0` | Fade-out duration in seconds (`0.1`–`10`) |
+| `fadeDurationSec` | `1.0` | Fade-out duration in seconds (`0.0`–`10`, `0` = instant vanish) |
 | `maxHistoryMessages` | `500` | Maximum messages kept in history (`20`–`5000`) |
 | `scrollStepLines` | `3` | Lines scrolled per mouse wheel notch (`1`–`20`) |
 | `compactDuplicates` | `true` | Merge consecutive duplicate messages into `[xN]` |
 | `showTimestamps` | `false` | Prefix messages with local `[HH:MM]` timestamp |
 | `clickToCopy` | `true` | Copy message text on click |
 | `clickToOpenUrl` | `true` | Open `http://` / `https://` links on left-click |
-| `clearHistoryOnWorldSwitch` | `false` | Clear history when joining/leaving a world or server |
+| `autoCloseOnSend` | `true` | Close chat automatically after sending a message or command |
+| `disableChatAnimations` | `true` | Disable screen transition animations when opening/closing chat |
+| `keepHudVisibleInChat` | `true` | Keep `hud_screen` & other mods' HUD overlays visible while chat is open |
+| `font` | `"default"` | Built-in font (`default`/`smooth`/`unicode`/`MinecraftTen`/`rune`/`SmoothSmall`) or `.ttf` path/filename |
+| `clearHistoryOnWorldSwitch` | `true` | Clear history when joining/leaving a world or server |
 | `verboseLog` | `false` | Emit extra diagnostic log lines |
 
 ---
