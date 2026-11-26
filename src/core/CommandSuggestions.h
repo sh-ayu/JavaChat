@@ -48,6 +48,17 @@ struct SuggestionApplyResult {
     bool        refreshIntellisense = true;
 };
 
+struct WordDeleteResult {
+    std::string newText;
+    int         newCaretCodepoint = 0;
+    bool        changed           = false;
+};
+
+// Delete the word immediately before `caretCodepoint` (negative or >= length means end of text).
+// Skips trailing whitespace, then deletes one contiguous character class (ASCII identifier,
+// Hiragana, Katakana, Kanji, other non-ASCII word chars, or punctuation).
+WordDeleteResult deletePreviousWordUtf8(std::string_view text, int caretCodepoint);
+
 // Extract pure command/argument token from Bedrock's autocomplete string
 // (trims leading item-icon spaces and strips " - <description>" suffix).
 std::string extractSuggestionToken(std::string_view rawBedrockText);

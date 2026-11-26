@@ -37,11 +37,29 @@ RectangleArea toArea(Rect const& r, float ox, float oy) noexcept {
     return a;
 }
 
-Font* getFallbackDebugFont(MinecraftUIRenderContext& ctx) noexcept {
+class ClippingRectGuard {
+public:
+    explicit ClippingRectGuard(MinecraftUIRenderContext& ctx) : mCtx(ctx) {
+        mCtx.saveCurrentClippingRectangle();
+    }
+    ~ClippingRectGuard() noexcept {
+        try {
+            mCtx.restoreSavedClippingRectangle();
+        } catch (...) {
+        }
+    }
+    ClippingRectGuard(ClippingRectGuard const&)            = delete;
+    ClippingRectGuard& operator=(ClippingRectGuard const&) = delete;
+
+private:
+    MinecraftUIRenderContext& mCtx;
+};
+
+std::shared_ptr<Font> getFallbackDebugFont(MinecraftUIRenderContext& ctx) noexcept {
     try {
-        return ctx.mDebugTextFontHandle.get().mDefaultFont.get();
+        return ctx.mDebugTextFontHandle.get().mDefaultFont;
     } catch (...) {
-        return nullptr;
+        return {};
     }
 }
 
@@ -70,6 +88,33 @@ void drawStyledText(
 
 } // namespace
 
+SearchBarLayout ChatRenderer::computeSearchBarLayout(
+    ChatViewLayout const& view,
+    float                 screenW,
+    float                 screenH,
+    ChatConfig const&     cfg
+) noexcept {
+    SearchBarLayout layout;
+    if (!(screenW > 0.0f && screenH > 0.0f)) return layout;
+
+    float const panelLeft  = (view.panelRect.width() > 1.0f) ? view.panelRect.x0 : cfg.leftOffset;
+    float const panelRight = (view.panelRect.width() > 1.0f)
+                               ? view.panelRect.x1
+                               : (panelLeft + std::min(cfg.width, std::max(80.0f, screenW - cfg.leftOffset - 4.0f)));
+    if (panelRight <= panelLeft + 16.0f) return layout;
+
+    float const barH       = 12.0f;
+    float const baseBottom = (view.panelRect.y1 > 1.0f) ? view.panelRect.y1 : (screenH - cfg.bottomOffset);
+    float const barY1      = view.lines.empty() ? baseBottom : (view.panelRect.y0 - 1.0f);
+    float const barY0      = std::max(4.0f, barY1 - barH);
+    if (barY0 + barH > screenH) return layout;
+
+    layout.visible      = true;
+    layout.barRect      = Rect{panelLeft, barY0, panelRight, barY0 + barH};
+    layout.closeBtnRect = Rect{std::max(panelLeft, panelRight - 14.0f), barY0, panelRight, barY0 + barH};
+    return layout;
+}
+
 TextMeasureFn ChatRenderer::makeMeasureFn(
     MinecraftUIRenderContext& ctx,
     FontRenderSet const&      fonts,
@@ -81,7 +126,7 @@ TextMeasureFn ChatRenderer::makeMeasureFn(
     }
     return [effective, fontScale](std::string_view sv) -> float {
         if (sv.empty()) return 0.0f;
-        Font* font = effective.selectForText(sv);
+        std::shared_ptr<Font> font = effective.selectForText(sv);
         if (font) {
             try {
                 int px = font->getLineLength(sv, fontScale, false);
@@ -103,11 +148,16 @@ void ChatRenderer::render(
     bool                      chatOpen,
     std::optional<size_t>     hoveredLine,
     ToastNotice const*        toast,
-    bool                      scrollbarActive
+    bool                      scrollbarActive,
+    SearchBarNotice const*    searchBar,
+    SearchBarLayout const*    searchLayout,
+    bool                      searchCloseHovered
 ) noexcept {
     try {
         bool const hasToast = (toast && toast->alpha > 0.01f && !toast->text.empty());
-        if (view.lines.empty() && !hasToast) return;
+        bool const hasSearchBar =
+            (chatOpen && searchBar && searchBar->active && searchLayout && searchLayout->visible);
+        if (view.lines.empty() && !hasToast && !hasSearchBar) return;
 
         FontRenderSet effective = fonts;
         if (!effective.primary) {
@@ -149,47 +199,112 @@ void ChatRenderer::render(
                 );
             }
 
-            ctx.saveCurrentClippingRectangle();
-            Rect textClip{
-                view.panelRect.x0,
-                view.panelRect.y0 - 2.0f,
-                view.panelRect.x1 + 1.0f,
-                view.panelRect.y1 + 2.0f
-            };
-            ctx.setClippingRectangle(toArea(textClip, originX, originY));
-
-            for (auto const& line : view.lines) {
-                if (line.textAlpha <= 0.001f || line.text.empty()) continue;
-                // Bedrock Font::drawText adds ~1px top bearing (notably on CJK SmoothFont);
-                // center against a 10px glyph+shadow box so 9px lines never protrude below panelBottom.
-                float const effectiveGlyphH = 10.0f * cfg.fontScale;
-                float const textYOffset     = std::floor((line.rect.height() - effectiveGlyphH) * 0.5f * 2.0f) * 0.5f;
-                Rect        textRect{
-                    line.rect.x0 + padX,
-                    line.rect.y0 + textYOffset,
-                    line.rect.x1 - 2.0f,
-                    line.rect.y1 + 2.0f
+            {
+                ClippingRectGuard clipGuard(ctx);
+                Rect textClip{
+                    view.panelRect.x0,
+                    view.panelRect.y0 - 2.0f,
+                    view.panelRect.x1 + 1.0f,
+                    view.panelRect.y1 + 2.0f
                 };
-                Font* lineFont = effective.selectForText(line.text);
-                drawStyledText(
-                    ctx,
-                    lineFont,
-                    toArea(textRect, originX, originY),
-                    line.text,
-                    kWhite,
-                    line.textAlpha,
-                    cfg.fontScale,
-                    cfg.textShadow
-                );
-            }
+                ctx.setClippingRectangle(toArea(textClip, originX, originY));
 
-            ctx.flushText(0.016f, std::nullopt);
-            ctx.restoreSavedClippingRectangle();
+                for (auto const& line : view.lines) {
+                    if (line.textAlpha <= 0.001f || line.text.empty()) continue;
+                    // Bedrock Font::drawText adds ~1px top bearing (notably on CJK SmoothFont);
+                    // center against a 10px glyph+shadow box so 9px lines never protrude below panelBottom.
+                    float const effectiveGlyphH = 10.0f * cfg.fontScale;
+                    float const textYOffset     = std::floor((line.rect.height() - effectiveGlyphH) * 0.5f * 2.0f) * 0.5f;
+                    Rect        textRect{
+                        line.rect.x0 + padX,
+                        line.rect.y0 + textYOffset,
+                        line.rect.x1 - 2.0f,
+                        line.rect.y1 + 2.0f
+                    };
+                    std::shared_ptr<Font> lineFont = effective.selectForText(line.text);
+                    drawStyledText(
+                        ctx,
+                        lineFont.get(),
+                        toArea(textRect, originX, originY),
+                        line.text,
+                        kWhite,
+                        line.textAlpha,
+                        cfg.fontScale,
+                        cfg.textShadow
+                    );
+                }
+
+                ctx.flushText(0.016f, std::nullopt);
+            }
         }
 
-        // Minimal feedback toast only after copy/URL click.
+        // Slim Java-style search header bar above the filtered chat panel.
+        if (hasSearchBar) {
+            ctx.fillRectangle(toArea(searchLayout->barRect, originX, originY), kBlack, 0.72f);
+            Rect accent{
+                searchLayout->barRect.x0,
+                searchLayout->barRect.y0,
+                searchLayout->barRect.x0 + 2.0f,
+                searchLayout->barRect.y1
+            };
+            ctx.fillRectangle(toArea(accent, originX, originY), kUrlUnderline, 0.90f);
+            if (searchCloseHovered) {
+                ctx.fillRectangle(toArea(searchLayout->closeBtnRect, originX, originY), kWhite, 0.14f);
+            }
+
+            std::string label;
+            if (searchBar->query.empty()) {
+                label = "\xC2\xA7" "bSearch\xC2\xA7" "7: type to filter ("
+                      + std::to_string(searchBar->totalCount) + " msgs)";
+            } else {
+                label = "\xC2\xA7" "bSearch\xC2\xA7" "f: " + searchBar->query
+                      + (searchBar->matchedCount == 0 ? " \xC2\xA7" "c(" : " \xC2\xA7" "7(")
+                      + std::to_string(searchBar->matchedCount) + "/"
+                      + std::to_string(searchBar->totalCount) + ")";
+            }
+
+            std::shared_ptr<Font> uiFont = effective.fallback ? effective.fallback : effective.primary;
+            {
+                ClippingRectGuard clipGuard(ctx);
+                Rect labelClip{
+                    searchLayout->barRect.x0 + 4.0f,
+                    searchLayout->barRect.y0,
+                    std::max(searchLayout->barRect.x0 + 4.0f, searchLayout->closeBtnRect.x0 - 2.0f),
+                    searchLayout->barRect.y1
+                };
+                ctx.setClippingRectangle(toArea(labelClip, originX, originY));
+                Rect labelRect{labelClip.x0, searchLayout->barRect.y0 + 2.0f, labelClip.x1, searchLayout->barRect.y1};
+                drawStyledText(ctx, uiFont.get(), toArea(labelRect, originX, originY), label, kWhite, 1.0f, 0.9f, true);
+                ctx.flushText(0.016f, std::nullopt);
+            }
+
+            Rect closeTextRect{
+                searchLayout->closeBtnRect.x0,
+                searchLayout->barRect.y0 + 2.0f,
+                searchLayout->closeBtnRect.x1 - 2.0f,
+                searchLayout->barRect.y1
+            };
+            drawStyledText(
+                ctx,
+                uiFont.get(),
+                toArea(closeTextRect, originX, originY),
+                "[x]",
+                searchCloseHovered ? kUrlUnderline : kSuggestionNormal,
+                1.0f,
+                0.9f,
+                true,
+                ::ui::TextAlignment::Right
+            );
+            ctx.flushText(0.016f, std::nullopt);
+        }
+
+        // Minimal feedback toast only after copy/URL click/clear.
         if (hasToast) {
-            float baseTop = view.lines.empty() ? 160.0f : view.panelRect.y0;
+            float baseTop = hasSearchBar
+                              ? searchLayout->barRect.y0
+                              : (view.lines.empty()
+                                     ? std::max(32.0f, (view.panelRect.y1 > 1.0f ? view.panelRect.y1 : 160.0f))
+                                     : view.panelRect.y0);
             float toastW  = std::max(64.0f, estimateTextWidth(toast->text, 0.9f) + 8.0f);
             float toastH  = 11.0f;
             float x0      = cfg.leftOffset;
@@ -197,8 +312,8 @@ void ChatRenderer::render(
             Rect  box{x0, y0, x0 + toastW, y0 + toastH};
             ctx.fillRectangle(toArea(box, originX, originY), kBlack, 0.50f * toast->alpha);
             Rect textBox{x0 + 4.0f, y0 + 1.0f, x0 + toastW - 2.0f, y0 + toastH};
-            Font* toastFont = effective.fallback ? effective.fallback : effective.primary;
-            drawStyledText(ctx, toastFont, toArea(textBox, originX, originY), toast->text, kWhite, toast->alpha, 0.9f, true);
+            std::shared_ptr<Font> toastFont = effective.fallback ? effective.fallback : effective.primary;
+            drawStyledText(ctx, toastFont.get(), toArea(textBox, originX, originY), toast->text, kWhite, toast->alpha, 0.9f, true);
             ctx.flushText(0.016f, std::nullopt);
         }
     } catch (...) {
@@ -213,9 +328,16 @@ void ChatRenderer::renderSuggestions(
     ChatConfig const&            cfg,
     FontRenderSet const&         fonts,
     Rect const*                  midCaretRect,
-    Rect const*                  selectionRect
+    Rect const*                  selectionRect,
+    bool                         searchModeActive,
+    float                        screenH
 ) noexcept {
     try {
+        if (searchModeActive && screenH > 16.0f) {
+            Rect accent{2.0f, screenH - 14.0f, 4.0f, screenH - 2.0f};
+            ctx.fillRectangle(toArea(accent, originX, originY), kUrlUnderline, 0.90f);
+        }
+
         bool const hasSelection =
             (selectionRect != nullptr && selectionRect->width() > 0.0f && selectionRect->height() > 0.0f);
         if (hasSelection) {
@@ -254,40 +376,41 @@ void ChatRenderer::renderSuggestions(
         float const rowScale = std::clamp(layout.rows.front().rect.height() / kSuggestionRowHeight, 0.5f, 2.0f);
         float const glyphH   = 8.0f * rowScale;
 
-        ctx.saveCurrentClippingRectangle();
-        Rect popupClip{
-            layout.popupRect.x0,
-            layout.popupRect.y0 - 1.0f,
-            layout.popupRect.x1 + 1.0f,
-            layout.popupRect.y1 + 1.0f
-        };
-        ctx.setClippingRectangle(toArea(popupClip, originX, originY));
-
-        for (auto const& row : layout.rows) {
-            if (row.text.empty()) continue;
-            mce::Color const& color = row.selected ? kSuggestionSelected : kSuggestionNormal;
-            float const       yOff  = std::max(1.0f, std::round((row.rect.height() - glyphH) * 0.5f));
-            Rect              textRect{
-                row.rect.x0 + kPopupPadLeft,
-                row.rect.y0 + yOff,
-                row.rect.x1,
-                row.rect.y1
+        {
+            ClippingRectGuard clipGuard(ctx);
+            Rect popupClip{
+                layout.popupRect.x0,
+                layout.popupRect.y0 - 1.0f,
+                layout.popupRect.x1 + 1.0f,
+                layout.popupRect.y1 + 1.0f
             };
-            Font* rowFont = effective.selectForText(row.text);
-            drawStyledText(
-                ctx,
-                rowFont,
-                toArea(textRect, originX, originY),
-                row.text,
-                color,
-                1.0f,
-                rowScale,
-                cfg.textShadow
-            );
-        }
+            ctx.setClippingRectangle(toArea(popupClip, originX, originY));
 
-        ctx.flushText(0.016f, std::nullopt);
-        ctx.restoreSavedClippingRectangle();
+            for (auto const& row : layout.rows) {
+                if (row.text.empty()) continue;
+                mce::Color const& color = row.selected ? kSuggestionSelected : kSuggestionNormal;
+                float const       yOff  = std::max(1.0f, std::round((row.rect.height() - glyphH) * 0.5f));
+                Rect              textRect{
+                    row.rect.x0 + kPopupPadLeft,
+                    row.rect.y0 + yOff,
+                    row.rect.x1,
+                    row.rect.y1
+                };
+                std::shared_ptr<Font> rowFont = effective.selectForText(row.text);
+                drawStyledText(
+                    ctx,
+                    rowFont.get(),
+                    toArea(textRect, originX, originY),
+                    row.text,
+                    color,
+                    1.0f,
+                    rowScale,
+                    cfg.textShadow
+                );
+            }
+
+            ctx.flushText(0.016f, std::nullopt);
+        }
     } catch (...) {
     }
 }

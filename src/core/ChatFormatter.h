@@ -22,6 +22,17 @@ bool isSectionCodeAt(std::string_view s, size_t pos, size_t& seqLen, char& codeO
 // Remove all Bedrock § formatting codes and unsafe control characters (converting tabs to spaces).
 std::string stripFormatting(std::string_view text);
 
+// Case-insensitive (ASCII A-Z) UTF-8 substring check. Empty `needle` returns true.
+bool containsIgnoreCaseAscii(std::string_view haystack, std::string_view needle) noexcept;
+
+// Highlight every case-insensitive match of `query` inside `formattedText` with `§<highlightColorCode>`,
+// restoring the original formatting state after each match so glyph metrics and `stripFormatting()` stay intact.
+std::string highlightFormattedMatches(
+    std::string_view formattedText,
+    std::string_view query,
+    char             highlightColorCode = 'e'
+);
+
 // Extract the first safe http:// or https:// URL from a chat line (after stripping § codes).
 std::optional<std::string> extractFirstUrl(std::string_view text);
 

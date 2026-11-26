@@ -4,13 +4,21 @@
 #include "core/CommandSuggestions.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <string_view>
 #include <utility>
 #include <variant>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
 #include <ll/api/io/Logger.h>
 #include <ll/api/memory/Hook.h>
@@ -55,6 +63,7 @@ constexpr uint32_t fnv1a32(std::string_view sv) noexcept {
 }
 
 constexpr uint32_t kButtonSendId                 = fnv1a32("button.send");
+constexpr uint32_t kButtonChatMenuCancelId       = fnv1a32("button.chat_menu_cancel");
 constexpr uint32_t kButtonChatAutocompleteId     = fnv1a32("button.chat_autocomplete");
 constexpr uint32_t kButtonChatAutocompleteBackId = fnv1a32("button.chat_autocomplete_back");
 constexpr uint32_t kButtonChatPrevMsgId          = fnv1a32("button.chat_previous_message");
@@ -123,6 +132,9 @@ LL_TYPE_INSTANCE_HOOK(
     ::ScreenEvent& screenEvent
 ) {
     auto& hooks = ChatBehaviorHooks::instance();
+    if (auto searchResult = hooks.onChatSearchEventBefore(this, &screenEvent)) {
+        return static_cast<::ui::ViewRequest>(*searchResult);
+    }
     if (auto navResult = hooks.onChatNavButtonBefore(this, &screenEvent)) {
         return static_cast<::ui::ViewRequest>(*navResult);
     }
@@ -150,7 +162,7 @@ LL_TYPE_INSTANCE_HOOK(
     ::UIRenderContext& context
 ) {
     auto& hooks = ChatBehaviorHooks::instance();
-    if (!hooks.shouldHookDisplayText(this)) {
+    if (!hooks.shouldHookDisplayText(this, &context)) {
         origin(context);
         return;
     }
@@ -163,12 +175,105 @@ LL_TYPE_INSTANCE_HOOK(
 
 using IgnoreAsTopFn = bool (*)(::UIScene const*);
 std::atomic<IgnoreAsTopFn> gOrigIgnoreAsTop{nullptr};
+void*                      gOrigIgnoreAsTopRaw = nullptr;
+
+bool isReadableRange(void const* ptr, size_t len) noexcept {
+    if (!ptr || len == 0) return false;
+    auto const addr = reinterpret_cast<uintptr_t>(ptr);
+    if (addr < 0x10000u || addr > (std::numeric_limits<uintptr_t>::max() - len)) return false;
+
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(ptr, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    if ((mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return false;
+
+    constexpr DWORD kReadableMask = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ
+                                  | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    if ((mbi.Protect & kReadableMask) == 0) return false;
+
+    auto const regionEnd = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+    return (addr + len) <= regionEnd;
+}
+
+void const* followSimpleJmpThunks(void const* fnPtr, int maxHops = 6) noexcept {
+    auto const* cur = reinterpret_cast<uint8_t const*>(fnPtr);
+    for (int hop = 0; hop < maxHops && cur != nullptr; ++hop) {
+        if (!isReadableRange(cur, 16)) break;
+
+        if (cur[0] == 0xE9) {
+            // jmp rel32
+            int32_t rel = 0;
+            std::memcpy(&rel, cur + 1, sizeof(rel));
+            cur = cur + 5 + static_cast<ptrdiff_t>(rel);
+            continue;
+        }
+        if (cur[0] == 0xEB) {
+            // jmp rel8
+            int8_t rel = static_cast<int8_t>(cur[1]);
+            cur        = cur + 2 + static_cast<ptrdiff_t>(rel);
+            continue;
+        }
+        if (cur[0] == 0xFF && cur[1] == 0x25) {
+            // jmp qword ptr [rip + disp32]
+            int32_t disp = 0;
+            std::memcpy(&disp, cur + 2, sizeof(disp));
+            auto const* slot = cur + 6 + static_cast<ptrdiff_t>(disp);
+            if (!isReadableRange(slot, sizeof(void*))) break;
+            void const* next = nullptr;
+            std::memcpy(&next, slot, sizeof(next));
+            if (!next || next == cur) break;
+            cur = reinterpret_cast<uint8_t const*>(next);
+            continue;
+        }
+        if (cur[0] == 0x48 && cur[1] == 0xFF && cur[2] == 0x25) {
+            // rex.w jmp qword ptr [rip + disp32]
+            int32_t disp = 0;
+            std::memcpy(&disp, cur + 3, sizeof(disp));
+            auto const* slot = cur + 7 + static_cast<ptrdiff_t>(disp);
+            if (!isReadableRange(slot, sizeof(void*))) break;
+            void const* next = nullptr;
+            std::memcpy(&next, slot, sizeof(next));
+            if (!next || next == cur) break;
+            cur = reinterpret_cast<uint8_t const*>(next);
+            continue;
+        }
+        if (cur[0] == 0x48 && cur[1] == 0xB8 && cur[10] == 0xFF && cur[11] == 0xE0) {
+            // mov rax, imm64; jmp rax
+            void const* next = nullptr;
+            std::memcpy(&next, cur + 2, sizeof(next));
+            if (!next || next == cur) break;
+            cur = reinterpret_cast<uint8_t const*>(next);
+            continue;
+        }
+        break;
+    }
+    return cur;
+}
+
+bool codeAddressesMatch(void const* a, void const* b) noexcept {
+    if (!a || !b) return false;
+    if (a == b) return true;
+    void const* const ra = followSimpleJmpThunks(a);
+    void const* const rb = followSimpleJmpThunks(b);
+    return (ra == b) || (a == rb) || (ra == rb);
+}
+
+bool matchesAnyAnchor(void const* actual, std::array<void const*, 3> const& candidates) noexcept {
+    for (void const* cand : candidates) {
+        if (cand && codeAddressesMatch(actual, cand)) return true;
+    }
+    return false;
+}
 
 bool ignoreAsTopDetour(::UIScene const* self) noexcept {
     if (ChatBehaviorHooks::instance().shouldTreatAsIgnoreTop(self)) {
         return true;
     }
     auto orig = gOrigIgnoreAsTop.load(std::memory_order_acquire);
+    if (!orig) {
+        void* raw = std::atomic_ref<void*>(gOrigIgnoreAsTopRaw).load(std::memory_order_acquire);
+        orig      = reinterpret_cast<IgnoreAsTopFn>(raw);
+    }
     return orig ? orig(self) : false;
 }
 
@@ -198,6 +303,7 @@ bool ChatBehaviorHooks::install(
     mLoggedAnchorMismatch.store(false, std::memory_order_relaxed);
     mJustExitedChat.store(false, std::memory_order_relaxed);
     mSuppressedHudExit.store(false, std::memory_order_relaxed);
+    mSearchMode.store(false, std::memory_order_release);
     clearPendingAutoClose();
     clearChatInputState();
 
@@ -244,10 +350,12 @@ void ChatBehaviorHooks::uninstall() noexcept {
     mShutdown.store(true, std::memory_order_relaxed);
     mJustExitedChat.store(false, std::memory_order_relaxed);
     mSuppressedHudExit.store(false, std::memory_order_relaxed);
+    mSearchMode.store(false, std::memory_order_release);
     clearPendingAutoClose();
     clearChatInputState();
     setChatNavHandler({});
     setChatTextEditAfterHandler({});
+    setChatSearchExitHandler({});
 
     if (mTextRenderHookInstalled.exchange(false, std::memory_order_relaxed)) {
         try {
@@ -268,6 +376,7 @@ void ChatBehaviorHooks::uninstall() noexcept {
         }
         mIgnoreAsTopTarget = nullptr;
         gOrigIgnoreAsTop.store(nullptr, std::memory_order_release);
+        std::atomic_ref<void*>(gOrigIgnoreAsTopRaw).store(nullptr, std::memory_order_release);
         mIgnoreAsTopAttempted.store(false, std::memory_order_relaxed);
         mLoggedAnchorMismatch.store(false, std::memory_order_relaxed);
     }
@@ -296,6 +405,7 @@ void ChatBehaviorHooks::setEnabled(bool enabled) noexcept {
     if (!enabled) {
         mJustExitedChat.store(false, std::memory_order_relaxed);
         mSuppressedHudExit.store(false, std::memory_order_relaxed);
+        mSearchMode.store(false, std::memory_order_release);
         clearPendingAutoClose();
         clearChatInputState();
     }
@@ -320,85 +430,116 @@ void ChatBehaviorHooks::setKeepHudVisibleInChat(bool keep) noexcept {
     mKeepHudVisibleInChat.store(keep, std::memory_order_relaxed);
 }
 
+void ChatBehaviorHooks::setSearchMode(bool active) noexcept {
+    mSearchMode.store(active, std::memory_order_release);
+}
+
 void ChatBehaviorHooks::ensureIgnoreAsTopHook(void const* scenePtr) noexcept {
     try {
         if (!scenePtr) return;
+        if (mShutdown.load(std::memory_order_relaxed) || !mEnabled.load(std::memory_order_relaxed)
+            || !mKeepHudVisibleInChat.load(std::memory_order_relaxed)) {
+            return;
+        }
         if (mIgnoreAsTopHookInstalled.load(std::memory_order_acquire)
             || mIgnoreAsTopAttempted.load(std::memory_order_acquire)) {
             return;
         }
         std::lock_guard lock(mIgnoreAsTopMutex);
-        if (mShutdown.load(std::memory_order_relaxed)
+        if (mShutdown.load(std::memory_order_relaxed) || !mEnabled.load(std::memory_order_relaxed)
+            || !mKeepHudVisibleInChat.load(std::memory_order_relaxed)
             || mIgnoreAsTopHookInstalled.load(std::memory_order_relaxed)
             || mIgnoreAsTopAttempted.load(std::memory_order_relaxed)) {
             return;
         }
+
+        // Latch immediately so any failure/mismatch below never retries on subsequent screen transitions.
+        mIgnoreAsTopAttempted.store(true, std::memory_order_release);
 
         auto const idxIgnore   = ::ll::memory::getVtableIndex(&::AbstractScene::ignoreAsTop);
         auto const idxRenderGb = ::ll::memory::getVtableIndex(&::AbstractScene::renderGameBehind);
         auto const idxExit     = ::ll::memory::getVtableIndex(&::AbstractScene::onScreenExit);
         auto const idxEnter    = ::ll::memory::getVtableIndex(&::AbstractScene::onScreenEntrance);
         if (!idxIgnore || !idxRenderGb || !idxExit || !idxEnter) {
-            mIgnoreAsTopAttempted.store(true, std::memory_order_release);
-            if (mLogger) mLogger->warn("JavaChat: failed to resolve AbstractScene vtable indices for ignoreAsTop");
-            return;
-        }
-
-        void* const* vtbl = *reinterpret_cast<void* const* const*>(scenePtr);
-        if (!vtbl) return;
-
-        void* const expectedRenderGb =
-            ::ll::memory::SymbolView("?$renderGameBehind@UIScene@@QEBA_NXZ").resolve(true);
-        void* const expectedExit =
-            ::ll::memory::SymbolView("?$onScreenExit@UIScene@@QEAAX_N0V?$shared_ptr@VAbstractScene@@@std@@@Z")
-                .resolve(true);
-        void* const expectedEnter =
-            ::ll::memory::SymbolView("?$onScreenEntrance@UIScene@@QEAAX_N0@Z").resolve(true);
-        if (!expectedRenderGb || !expectedExit || !expectedEnter) {
-            mIgnoreAsTopAttempted.store(true, std::memory_order_release);
             if (mLogger) {
-                mLogger->warn(
-                    "JavaChat: failed to resolve UIScene anchors (renderGameBehind={}, onScreenExit={}, onScreenEntrance={})",
-                    expectedRenderGb != nullptr,
-                    expectedExit != nullptr,
-                    expectedEnter != nullptr
-                );
+                mLogger->debug("JavaChat: failed to resolve AbstractScene vtable indices; keepHud hook disabled");
             }
             return;
         }
 
-        if (vtbl[*idxRenderGb] != expectedRenderGb || vtbl[*idxExit] != expectedExit
-            || vtbl[*idxEnter] != expectedEnter) {
-            // Derived UIScene subclass (or mismatch); log once and wait for a plain UIScene instance.
+        if (!isReadableRange(scenePtr, sizeof(void*))) {
+            return;
+        }
+        void* const* vtbl = *reinterpret_cast<void* const* const*>(scenePtr);
+        size_t const maxIdx = std::max({*idxIgnore, *idxRenderGb, *idxExit, *idxEnter});
+        if (!vtbl || !isReadableRange(vtbl, (maxIdx + 1) * sizeof(void*))) {
+            return;
+        }
+
+        std::array<void const*, 3> const expectedRenderGb{
+            ::ll::memory::SymbolView("?renderGameBehind@UIScene@@UEBA_NXZ").resolve(true),
+            ::ll::memory::SymbolView("?$renderGameBehind@UIScene@@QEBA_NXZ").resolve(true),
+            ::ll::memory::toFuncPtr(&::UIScene::$renderGameBehind),
+        };
+        std::array<void const*, 3> const expectedExit{
+            ::ll::memory::SymbolView("?onScreenExit@UIScene@@UEAAX_N0V?$shared_ptr@VAbstractScene@@@std@@@Z")
+                .resolve(true),
+            ::ll::memory::SymbolView("?$onScreenExit@UIScene@@QEAAX_N0V?$shared_ptr@VAbstractScene@@@std@@@Z")
+                .resolve(true),
+            ::ll::memory::toFuncPtr(&::UIScene::$onScreenExit),
+        };
+        std::array<void const*, 3> const expectedEnter{
+            ::ll::memory::SymbolView("?onScreenEntrance@UIScene@@UEAAX_N0@Z").resolve(true),
+            ::ll::memory::SymbolView("?$onScreenEntrance@UIScene@@QEAAX_N0@Z").resolve(true),
+            ::ll::memory::toFuncPtr(&::UIScene::$onScreenEntrance),
+        };
+
+        auto firstNonNull = [](std::array<void const*, 3> const& arr) -> void const* {
+            for (void const* p : arr) {
+                if (p) return p;
+            }
+            return nullptr;
+        };
+        if (!firstNonNull(expectedRenderGb) || !firstNonNull(expectedExit) || !firstNonNull(expectedEnter)) {
+            if (mLogger) {
+                mLogger->debug("JavaChat: could not resolve UIScene anchors; keepHud hook disabled");
+            }
+            return;
+        }
+
+        if (!matchesAnyAnchor(vtbl[*idxRenderGb], expectedRenderGb)
+            || !matchesAnyAnchor(vtbl[*idxExit], expectedExit)
+            || !matchesAnyAnchor(vtbl[*idxEnter], expectedEnter)) {
             if (!mLoggedAnchorMismatch.exchange(true, std::memory_order_relaxed) && mLogger) {
-                mLogger->warn(
-                    "JavaChat: UIScene vtable anchor mismatch (rgb=0x{:x}/0x{:x}, exit=0x{:x}/0x{:x}, ent=0x{:x}/0x{:x})",
+                mLogger->debug(
+                    "JavaChat: UIScene vtable anchor check did not match (rgb=0x{:x}, exit=0x{:x}, ent=0x{:x}); skipping keepHud hook",
                     reinterpret_cast<uintptr_t>(vtbl[*idxRenderGb]),
-                    reinterpret_cast<uintptr_t>(expectedRenderGb),
                     reinterpret_cast<uintptr_t>(vtbl[*idxExit]),
-                    reinterpret_cast<uintptr_t>(expectedExit),
-                    reinterpret_cast<uintptr_t>(vtbl[*idxEnter]),
-                    reinterpret_cast<uintptr_t>(expectedEnter)
+                    reinterpret_cast<uintptr_t>(vtbl[*idxEnter])
                 );
             }
             return;
         }
 
         void* target = const_cast<void*>(vtbl[*idxIgnore]);
-        if (!target || target == vtbl[*idxRenderGb] || target == vtbl[*idxEnter]) {
-            mIgnoreAsTopAttempted.store(true, std::memory_order_release);
-            if (mLogger) mLogger->warn("JavaChat: invalid UIScene::ignoreAsTop target address");
+        if (!target || codeAddressesMatch(target, vtbl[*idxRenderGb])
+            || codeAddressesMatch(target, vtbl[*idxEnter])) {
+            if (mLogger) {
+                mLogger->debug("JavaChat: invalid UIScene::ignoreAsTop target address; skipping keepHud hook");
+            }
             return;
         }
 
-        mIgnoreAsTopAttempted.store(true, std::memory_order_release);
-        void*     origRaw = nullptr;
-        int const rc      = ::ll::memory::hook(
+        gOrigIgnoreAsTop.store(nullptr, std::memory_order_release);
+        std::atomic_ref<void*>(gOrigIgnoreAsTopRaw).store(nullptr, std::memory_order_release);
+
+        int const rc = ::ll::memory::hook(
             target,
             reinterpret_cast<::ll::memory::FuncPtr>(&ignoreAsTopDetour),
-            reinterpret_cast<::ll::memory::FuncPtr*>(&origRaw),
+            reinterpret_cast<::ll::memory::FuncPtr*>(&gOrigIgnoreAsTopRaw),
             ::ll::memory::HookPriority::Normal
         );
+        void* const origRaw = std::atomic_ref<void*>(gOrigIgnoreAsTopRaw).load(std::memory_order_acquire);
         if (rc == 0 && origRaw != nullptr) {
             gOrigIgnoreAsTop.store(reinterpret_cast<IgnoreAsTopFn>(origRaw), std::memory_order_release);
             mIgnoreAsTopTarget = target;
@@ -406,8 +547,12 @@ void ChatBehaviorHooks::ensureIgnoreAsTopHook(void const* scenePtr) noexcept {
             if (mLogger) {
                 mLogger->info("JavaChat: keepHud hook ready (UIScene::ignoreAsTop)");
             }
-        } else if (mLogger) {
-            mLogger->warn("JavaChat: UIScene::ignoreAsTop hook failed (rc={})", rc);
+        } else {
+            gOrigIgnoreAsTop.store(nullptr, std::memory_order_release);
+            std::atomic_ref<void*>(gOrigIgnoreAsTopRaw).store(nullptr, std::memory_order_release);
+            if (mLogger) {
+                mLogger->debug("JavaChat: UIScene::ignoreAsTop hook unavailable (rc={})", rc);
+            }
         }
     } catch (...) {
         mIgnoreAsTopAttempted.store(true, std::memory_order_release);
@@ -436,14 +581,23 @@ void ChatBehaviorHooks::setChatTextEditAfterHandler(ChatTextEditAfterHandler han
     mChatTextEditAfterHandler = std::move(handler);
 }
 
+void ChatBehaviorHooks::setChatSearchExitHandler(ChatSearchExitHandler handler) noexcept {
+    std::lock_guard lock(mNavMutex);
+    mChatSearchExitHandler = std::move(handler);
+}
+
 void ChatBehaviorHooks::updateChatInputState(
     void*            displayTextComp,
     void*            chatController,
-    InputVisualState state
+    InputVisualState state,
+    void const*      expectedRenderCtxVtbl
 ) noexcept {
     try {
         mTrackedDisplayTextComp.store(displayTextComp, std::memory_order_release);
         mTrackedChatCtrl.store(chatController, std::memory_order_release);
+        if (expectedRenderCtxVtbl) {
+            mTrackedRenderCtxVtbl.store(expectedRenderCtxVtbl, std::memory_order_release);
+        }
         std::lock_guard lock(mInputVisualMutex);
         mInputVisualState = std::move(state);
     } catch (...) {
@@ -452,8 +606,10 @@ void ChatBehaviorHooks::updateChatInputState(
 
 void ChatBehaviorHooks::clearChatInputState() noexcept {
     try {
+        mSearchMode.store(false, std::memory_order_release);
         mTrackedDisplayTextComp.store(nullptr, std::memory_order_release);
         mTrackedChatCtrl.store(nullptr, std::memory_order_release);
+        mTrackedRenderCtxVtbl.store(nullptr, std::memory_order_release);
         std::lock_guard lock(mInputVisualMutex);
         mInputVisualState       = InputVisualState{};
         mCapturedGeom           = CapturedInputGeometry{};
@@ -476,8 +632,10 @@ void ChatBehaviorHooks::clearPendingAutoClose() noexcept {
 void ChatBehaviorHooks::onScreenEntranceBefore(void const* scenePtr, bool& doScreenTransitions) noexcept {
     try {
         if (mShutdown.load(std::memory_order_relaxed)) return;
-        ensureIgnoreAsTopHook(scenePtr);
         if (!mEnabled.load(std::memory_order_relaxed)) return;
+        if (mKeepHudVisibleInChat.load(std::memory_order_relaxed)) {
+            ensureIgnoreAsTopHook(scenePtr);
+        }
 
         auto const* scene = static_cast<::UIScene const*>(scenePtr);
         if (!scene) return;
@@ -509,9 +667,6 @@ void ChatBehaviorHooks::onScreenExitBefore(
     bool&       doScreenTransitions
 ) noexcept {
     try {
-        if (!mShutdown.load(std::memory_order_relaxed)) {
-            ensureIgnoreAsTopHook(scenePtr);
-        }
         auto const* scene  = static_cast<::UIScene const*>(scenePtr);
         auto const* pushed = static_cast<::AbstractScene const*>(pushedScenePtr);
         if (!scene) return;
@@ -522,6 +677,9 @@ void ChatBehaviorHooks::onScreenExitBefore(
             clearChatInputState();
         }
         if (mShutdown.load(std::memory_order_relaxed) || !mEnabled.load(std::memory_order_relaxed)) return;
+        if (mKeepHudVisibleInChat.load(std::memory_order_relaxed)) {
+            ensureIgnoreAsTopHook(scenePtr);
+        }
 
         bool const disableAnim = mDisableAnimations.load(std::memory_order_relaxed);
         if (isChat) {
@@ -539,6 +697,51 @@ void ChatBehaviorHooks::onScreenExitBefore(
         }
     } catch (...) {
     }
+}
+
+std::optional<unsigned int> ChatBehaviorHooks::onChatSearchEventBefore(
+    void*       controllerPtr,
+    void const* screenEventPtr
+) noexcept {
+    try {
+        if (mShutdown.load(std::memory_order_relaxed) || !mEnabled.load(std::memory_order_relaxed)
+            || !mSearchMode.load(std::memory_order_acquire)) {
+            return std::nullopt;
+        }
+        if (!controllerPtr || controllerPtr != mTrackedChatCtrl.load(std::memory_order_acquire)) {
+            return std::nullopt;
+        }
+        auto const& ev = *static_cast<::ScreenEvent const*>(screenEventPtr);
+        if (ev.type == ::ScreenEventType::TextEditChange) {
+            auto const& te = ev.data.get().textEdit.get();
+            if (te.result == ::TextCharEventResult::EnterPressed) {
+                return static_cast<unsigned int>(::ui::ViewRequest::ConsumeEvent);
+            }
+            return std::nullopt;
+        }
+        if (ev.type == ::ScreenEventType::ButtonEvent) {
+            auto const& btn = ev.data.get().button.get();
+            if (btn.id == kButtonSendId) {
+                return static_cast<unsigned int>(::ui::ViewRequest::ConsumeEvent);
+            }
+            if (btn.id == kButtonChatMenuCancelId && btn.state == ::ButtonState::Down
+                && btn.previousState != ::ButtonState::Down) {
+                ChatSearchExitHandler handlerCopy;
+                {
+                    std::lock_guard lock(mNavMutex);
+                    handlerCopy = mChatSearchExitHandler;
+                }
+                if (handlerCopy) {
+                    auto* chatCtrl = static_cast<::ChatScreenController*>(controllerPtr);
+                    handlerCopy(*chatCtrl);
+                    return static_cast<unsigned int>(::ui::ViewRequest::ConsumeEvent)
+                         | static_cast<unsigned int>(::ui::ViewRequest::Refresh);
+                }
+            }
+        }
+    } catch (...) {
+    }
+    return std::nullopt;
 }
 
 std::optional<unsigned int> ChatBehaviorHooks::onChatNavButtonBefore(
@@ -603,9 +806,19 @@ std::optional<unsigned int> ChatBehaviorHooks::onChatTextEditAfter(
     }
 }
 
-bool ChatBehaviorHooks::shouldHookDisplayText(void const* textCompPtr) const noexcept {
+bool ChatBehaviorHooks::shouldHookDisplayText(
+    void const* textCompPtr,
+    void const* renderContextPtr
+) const noexcept {
     if (mShutdown.load(std::memory_order_relaxed) || !mEnabled.load(std::memory_order_relaxed)) return false;
-    return textCompPtr != nullptr && textCompPtr == mTrackedDisplayTextComp.load(std::memory_order_acquire);
+    if (!textCompPtr || textCompPtr != mTrackedDisplayTextComp.load(std::memory_order_acquire)) return false;
+    if (renderContextPtr) {
+        void const* const expectedVtbl = mTrackedRenderCtxVtbl.load(std::memory_order_acquire);
+        if (!expectedVtbl) return false;
+        void const* const actualVtbl = *reinterpret_cast<void const* const*>(renderContextPtr);
+        if (actualVtbl != expectedVtbl) return false;
+    }
+    return true;
 }
 
 void ChatBehaviorHooks::processDisplayTextAfterRender(
@@ -616,10 +829,10 @@ void ChatBehaviorHooks::processDisplayTextAfterRender(
     bool   caretBlinkVisible
 ) noexcept {
     try {
-        if (!shouldHookDisplayText(textCompPtr) || !renderContextPtr) return;
+        if (!shouldHookDisplayText(textCompPtr, renderContextPtr) || !renderContextPtr) return;
         auto& mcCtx = *static_cast<::MinecraftUIRenderContext*>(renderContextPtr);
         auto& items = mcCtx.mTextToDraw.get();
-        if (items.size() != beforeCount + 1) return;
+        if (items.empty() || items.size() <= beforeCount || items.size() != beforeCount + 1) return;
 
         auto& item = items.back();
 
@@ -644,6 +857,12 @@ void ChatBehaviorHooks::processDisplayTextAfterRender(
         ::ui::TextAlignment align        = item.mAlignment;
         bool const          shadow       = item.mShadow;
         bool const          blinkVisible = caretFocused && caretBlinkVisible;
+
+        if (!std::isfinite(fontScale) || fontScale <= 0.0f || fontScale > 16.0f) return;
+        if (!std::isfinite(origArea._x0) || !std::isfinite(origArea._y0)
+            || !std::isfinite(origArea._x1) || !std::isfinite(origArea._y1)) {
+            return;
+        }
 
         size_t const     cpCount = countUtf8Codepoints(plainCopy);
         InputVisualState stateCopy;

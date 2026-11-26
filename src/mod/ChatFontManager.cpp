@@ -56,13 +56,27 @@ std::string trimQuotesAndSpace(std::string_view sv) {
     return std::string(sv);
 }
 
+std::filesystem::path utf8ToPath(std::string_view utf8) {
+    if (utf8.empty()) return {};
+    int const needed = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (needed <= 0) return std::filesystem::path(utf8);
+    std::wstring wide(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wide.data(), needed);
+    return std::filesystem::path(std::move(wide));
+}
+
+std::string pathToUtf8(std::filesystem::path const& p) {
+    auto const u8 = p.u8string();
+    return std::string(reinterpret_cast<char const*>(u8.data()), u8.size());
+}
+
 std::filesystem::path findFileCaseInsensitive(std::filesystem::path const& dir, std::string_view targetName) {
     std::error_code ec;
     if (!std::filesystem::exists(dir, ec) || !std::filesystem::is_directory(dir, ec)) return {};
     std::string targetLo = toLowerAsciiStr(targetName);
     for (auto const& entry : std::filesystem::directory_iterator(dir, ec)) {
         if (ec || !entry.is_regular_file(ec)) continue;
-        std::string fname = entry.path().filename().string();
+        std::string fname = pathToUtf8(entry.path().filename());
         if (toLowerAsciiStr(fname) == targetLo) {
             return entry.path();
         }
@@ -83,20 +97,23 @@ std::filesystem::path resolveTtfFile(std::string const& rawSpec, std::filesystem
         return {};
     };
 
-    std::filesystem::path direct(cleaned);
+    std::filesystem::path direct = utf8ToPath(cleaned);
     if (auto found = checkCandidate(direct); !found.empty()) return found;
     if (!direct.has_extension()) {
-        if (auto found = checkCandidate(std::filesystem::path(cleaned + ".ttf")); !found.empty()) return found;
+        if (auto found = checkCandidate(utf8ToPath(cleaned + ".ttf")); !found.empty()) return found;
     }
 
     std::vector<std::filesystem::path> searchDirs;
     if (!userFontsDir.empty()) searchDirs.push_back(userFontsDir);
-    char localAppDataBuf[MAX_PATH]{};
-    if (DWORD len = GetEnvironmentVariableA("LOCALAPPDATA", localAppDataBuf, MAX_PATH);
-        len > 0 && len < MAX_PATH) {
-        searchDirs.push_back(std::filesystem::path(localAppDataBuf) / "Microsoft" / "Windows" / "Fonts");
+    if (DWORD needed = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0); needed > 1) {
+        std::wstring localAppData(static_cast<size_t>(needed), L'\0');
+        DWORD const  written = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData.data(), needed);
+        if (written > 0 && written < needed) {
+            localAppData.resize(static_cast<size_t>(written));
+            searchDirs.push_back(std::filesystem::path(std::move(localAppData)) / L"Microsoft" / L"Windows" / L"Fonts");
+        }
     }
-    searchDirs.push_back(std::filesystem::path("C:\\Windows\\Fonts"));
+    searchDirs.push_back(std::filesystem::path(L"C:\\Windows\\Fonts"));
 
     std::vector<std::string> namesToTry{cleaned};
     if (!direct.has_extension()) {
@@ -105,7 +122,7 @@ std::filesystem::path resolveTtfFile(std::string const& rawSpec, std::filesystem
 
     for (auto const& dir : searchDirs) {
         for (auto const& name : namesToTry) {
-            if (auto found = checkCandidate(dir / name); !found.empty()) return found;
+            if (auto found = checkCandidate(dir / utf8ToPath(name)); !found.empty()) return found;
             if (auto found = findFileCaseInsensitive(dir, name); !found.empty()) return found;
         }
     }
@@ -299,9 +316,9 @@ ResolvedFont resolveByName(FontRepository const* repo, std::string const& name) 
 
 } // namespace
 
-Font* FontRenderSet::selectForText(std::string_view sv) const noexcept {
+std::shared_ptr<Font> FontRenderSet::selectForText(std::string_view sv) const noexcept {
     if (!primary) return fallback;
-    if (!checkFallbackPerLine || !fallback || fallback == primary) return primary;
+    if (!checkFallbackPerLine || !fallback || fallback.get() == primary.get()) return primary;
 
     bool hasNonAscii = false;
     for (unsigned char c : sv) {
@@ -611,8 +628,8 @@ void ChatFontManager::shutdown() noexcept {
 FontRenderSet ChatFontManager::renderSet() const noexcept {
     std::lock_guard lock(mMutex);
     FontRenderSet   set;
-    set.primary              = mPrimaryFont.get();
-    set.fallback             = mFallbackFont.get();
+    set.primary              = mPrimaryFont;
+    set.fallback             = mFallbackFont;
     set.checkFallbackPerLine = mUsingCustomTtf.load(std::memory_order_relaxed) && mPrimaryFont && mFallbackFont
                             && (mPrimaryFont.get() != mFallbackFont.get());
     return set;

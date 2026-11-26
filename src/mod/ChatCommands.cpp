@@ -72,9 +72,9 @@ void registerChatCommands(std::weak_ptr<ll::mod::Mod> weakMod) {
     cmd.overload(weakMod).text("toggle").execute([](CommandOrigin const&, CommandOutput& out) {
         bool nowEnabled = JavaChatMod::instance().toggleEnabled();
         if (nowEnabled) {
-            out.success("JavaChat: enabled");
+            out.success("JavaChat: enabled (close chat to reload JavaChat UI)");
         } else {
-            out.success("JavaChat: disabled (overlay hidden; rejoin world or restart to restore vanilla chat UI)");
+            out.success("JavaChat: disabled (close chat to restore vanilla chat UI)");
         }
     });
 

@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <ctime>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -30,9 +31,12 @@
 #include <ll/api/io/Logger.h>
 #include <ll/api/mod/NativeMod.h>
 #include <ll/api/service/TargetedBedrock.h>
+#include <ll/api/thread/ClientThreadExecutor.h>
 
 #include <mc/client/game/ClientInstance.h>
 #include <mc/client/game/IMinecraftGame.h>
+#include <mc/resources/ResourcePackManager.h>
+#include <mc/client/gui/FontRepository.h>
 #include <mc/client/gui/GuiData.h>
 #include <mc/client/gui/GuiMessage.h>
 #include <mc/client/gui/ViewRequest.h>
@@ -157,13 +161,31 @@ bool copyUtf8ToClipboard(std::string_view utf8) noexcept {
 
 bool openSafeHttpUrl(std::string_view url) noexcept {
     try {
+        constexpr size_t kMaxUrlLength = 2048;
+        if (url.empty() || url.size() > kMaxUrlLength) return false;
         if (!(url.starts_with("https://") || url.starts_with("http://"))) return false;
+        for (unsigned char c : url) {
+            if (c <= 0x20u || c == 0x7Fu) return false;
+        }
+        size_t const schemeEnd = url.find("://");
+        if (schemeEnd == std::string_view::npos || url.size() <= schemeEnd + 3) return false;
+        std::string_view const rest      = url.substr(schemeEnd + 3);
+        size_t const           pathPos   = rest.find_first_of("/?#");
+        std::string_view const authority = (pathPos == std::string_view::npos) ? rest : rest.substr(0, pathPos);
+        if (authority.empty() || authority.find('@') != std::string_view::npos) return false;
+
         int needed = MultiByteToWideChar(CP_UTF8, 0, url.data(), static_cast<int>(url.size()), nullptr, 0);
         if (needed <= 0) return false;
         std::wstring wurl(static_cast<size_t>(needed), L'\0');
         MultiByteToWideChar(CP_UTF8, 0, url.data(), static_cast<int>(url.size()), wurl.data(), needed);
-        HINSTANCE res = ShellExecuteW(nullptr, L"open", wurl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        return reinterpret_cast<intptr_t>(res) > 32;
+        // Dispatch ShellExecuteW asynchronously so the UI/input thread is never blocked.
+        std::thread([target = std::move(wurl)]() noexcept {
+            try {
+                ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            } catch (...) {
+            }
+        }).detach();
+        return true;
     } catch (...) {
         return false;
     }
@@ -229,7 +251,8 @@ std::string_view extractGuiMessageText(GuiMessage const& gm, std::string& scratc
 TextComponent* findDisplayTextComponent(
     ScreenView const&           screenView,
     bool                        sameScreen,
-    std::shared_ptr<UIControl>& ctrlSlot
+    std::shared_ptr<UIControl>& ctrlSlot,
+    FontRepository const*       expectedFontRepo
 ) noexcept {
     try {
         if (!sameScreen) ctrlSlot.reset();
@@ -241,7 +264,12 @@ TextComponent* findDisplayTextComponent(
         if (!ctrlSlot) return nullptr;
         auto const& lookup = ctrlSlot->mRenderableComponentLookup.get();
         if (lookup.size() != 1 || !lookup[0]) return nullptr;
-        return reinterpret_cast<TextComponent*>(lookup[0]);
+        auto* tc = reinterpret_cast<TextComponent*>(lookup[0]);
+        // RTTI-free type guard: verify TextComponent::mFontRepository matches the live FontRepository.
+        if (expectedFontRepo && tc->mFontRepository.get().get() != expectedFontRepo) {
+            return nullptr;
+        }
+        return tc;
     } catch (...) {
         return nullptr;
     }
@@ -329,7 +357,7 @@ bool JavaChatMod::enable() {
     bool pinHookOk = PackPinner::instance().install(
         &mSelf->getLogger(),
         kUiPackUuid,
-        cfgCopy.enabled && cfgCopy.overrideServerChatUi,
+        computePackPinMode(cfgCopy.enabled, cfgCopy.overrideServerChatUi),
         cfgCopy.verboseLog
     );
     if (!pinHookOk) {
@@ -355,12 +383,16 @@ bool JavaChatMod::enable() {
             return handleChatTextEditAfter(ctrl, textEditResult);
         }
     );
+    ChatBehaviorHooks::instance().setChatSearchExitHandler(
+        [this](ChatScreenController& ctrl) { handleSearchExitFromHook(ctrl); }
+    );
 
     {
         std::lock_guard lock(mMutex);
         mSuggestions.reset();
         mSuggestions.clearKnownCommands();
         mLastSuggestionLayout    = {};
+        exitSearchModeLocked(false);
         clearInputSelectionStateLocked();
         mLastHoverMouseX         = -1.0f;
         mLastHoverMouseY         = -1.0f;
@@ -369,6 +401,10 @@ bool JavaChatMod::enable() {
         mCachedDisplayTextScreen = nullptr;
         mCachedDisplayTextCtrl.reset();
     }
+    mInGameHudOrChat.store(false, std::memory_order_relaxed);
+    mLastHudOrChatMs.store(0, std::memory_order_relaxed);
+    mF3DLatched.store(false, std::memory_order_relaxed);
+    mPendingUiReload.store(false, std::memory_order_relaxed);
 
     auto& bus = ll::event::EventBus::getInstance();
 
@@ -438,28 +474,17 @@ bool JavaChatMod::enable() {
 }
 
 bool JavaChatMod::disable() {
-    mShutdown.store(true, std::memory_order_relaxed);
+    // Ordered teardown:
+    // 1) Raise shutdown gate so any in-flight callbacks bail out immediately.
+    mShutdown.store(true, std::memory_order_release);
     mChatOpen.store(false, std::memory_order_relaxed);
     mLastChatOpenMs.store(0, std::memory_order_relaxed);
+    mInGameHudOrChat.store(false, std::memory_order_relaxed);
+    mLastHudOrChatMs.store(0, std::memory_order_relaxed);
+    mF3DLatched.store(false, std::memory_order_relaxed);
+    mPendingUiReload.store(false, std::memory_order_relaxed);
 
-    ChatBehaviorHooks::instance().uninstall();
-    PackPinner::instance().uninstall();
-    ChatFontManager::instance().shutdown();
-
-    {
-        std::lock_guard lock(mMutex);
-        mSuggestions.reset();
-        mSuggestions.clearKnownCommands();
-        mLastSuggestionLayout    = {};
-        clearInputSelectionStateLocked();
-        mLastHoverMouseX         = -1.0f;
-        mLastHoverMouseY         = -1.0f;
-        mDraggingScrollbar       = false;
-        mLastLevelPtr            = nullptr;
-        mCachedDisplayTextScreen = nullptr;
-        mCachedDisplayTextCtrl.reset();
-    }
-
+    // 2) Remove all EventBus listeners before unhooking or releasing font references.
     auto& bus = ll::event::EventBus::getInstance();
     for (auto* ptr : {&mBeforeRenderListener, &mRenderListener, &mMouseListener, &mKeyListener, &mCommandListener, &mStartJoinListener, &mJoinListener, &mExitListener}) {
         if (*ptr) {
@@ -467,11 +492,20 @@ bool JavaChatMod::disable() {
             ptr->reset();
         }
     }
+
+    // 3) Uninstall hooks.
+    ChatBehaviorHooks::instance().uninstall();
+    PackPinner::instance().uninstall();
+
+    // 4) Shut down font manager after render listeners and hooks are gone.
+    ChatFontManager::instance().shutdown();
+
     {
         std::lock_guard lock(mMutex);
         mSuggestions.reset();
         mSuggestions.clearKnownCommands();
         mLastSuggestionLayout    = {};
+        exitSearchModeLocked(false);
         clearInputSelectionStateLocked();
         mLastHoverMouseX         = -1.0f;
         mLastHoverMouseY         = -1.0f;
@@ -500,12 +534,47 @@ void JavaChatMod::onWorldTransition() noexcept {
         mSuggestions.reset();
         mSuggestions.clearKnownCommands();
         mLastSuggestionLayout    = {};
+        exitSearchModeLocked(false);
         clearInputSelectionStateLocked();
         mLastHoverMouseX         = -1.0f;
         mLastHoverMouseY         = -1.0f;
         mCachedDisplayTextScreen = nullptr;
         mCachedDisplayTextCtrl.reset();
         mChatOpen.store(false, std::memory_order_relaxed);
+        mInGameHudOrChat.store(false, std::memory_order_relaxed);
+    } catch (...) {
+    }
+}
+
+void JavaChatMod::exitSearchModeLocked(bool restoreDraft) noexcept {
+    if (!mSearchMode) return;
+    std::string draft = std::move(mSavedDraftBeforeSearch);
+    mSavedDraftBeforeSearch.clear();
+    mSearchMode          = false;
+    mSearchQuery.clear();
+    mLastSearchBarLayout = {};
+    mInputAllSelected    = false;
+    mSelectedTextSnapshot.clear();
+    mPendingCaretPos.reset();
+    mHistory.scrollToBottom();
+    ChatBehaviorHooks::instance().setSearchMode(false);
+    if (restoreDraft) {
+        mPendingInputEdit  = PendingInputEdit{draft, true, -1, std::nullopt};
+        mLastObservedInput = std::move(draft);
+    }
+}
+
+void JavaChatMod::handleSearchExitFromHook(ChatScreenController& chatCtrl) noexcept {
+    try {
+        std::string draftToRestore;
+        {
+            std::lock_guard lock(mMutex);
+            if (!mConfig.enabled || !mSearchMode) return;
+            draftToRestore     = mSavedDraftBeforeSearch;
+            mLastObservedInput = draftToRestore;
+            exitSearchModeLocked(false);
+        }
+        syncChatTextBox(chatCtrl, draftToRestore, true, -1);
     } catch (...) {
     }
 }
@@ -516,6 +585,37 @@ void JavaChatMod::clearInputSelectionStateLocked() noexcept {
     mLastObservedInput.clear();
     mInputAllSelected = false;
     mSelectedTextSnapshot.clear();
+}
+
+void JavaChatMod::scheduleUiPackReload() noexcept {
+    try {
+        ll::thread::ClientThreadExecutor::getDefault().execute([this]() { applyUiPackReloadOnClientThread(); });
+    } catch (...) {
+    }
+}
+
+void JavaChatMod::applyUiPackReloadOnClientThread() noexcept {
+    try {
+        if (mShutdown.load(std::memory_order_relaxed)) return;
+        auto clientRef = ll::service::getClientInstance();
+        if (!clientRef) return;
+        auto& client = clientRef.value();
+        if (!client.getMinecraftGame().isInGame()) return;
+
+        // Wait until chat_screen is completely gone before rebuilding UI definitions.
+        if (client.getScreenName() == "chat_screen") {
+            mPendingUiReload.store(true, std::memory_order_release);
+            return;
+        }
+
+        client.getResourcePackManager()._composeFullStack();
+        client.getMinecraftGame().handleReloadUIDefinitions();
+        ChatFontManager::instance().invalidateUiSync();
+        if (mSelf) {
+            mSelf->getLogger().info("JavaChat: reloaded UI pack stack ({})", PackPinner::instance().statusSummary());
+        }
+    } catch (...) {
+    }
 }
 
 void JavaChatMod::showToastLocked(std::string text, double nowSec) {
@@ -564,6 +664,7 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
         auto* player = client.getLocalPlayer();
         if (!player || !client.getMinecraftGame().isInGame() || client.getOptions().getHideHud()) {
             mChatOpen.store(false, std::memory_order_relaxed);
+            mInGameHudOrChat.store(false, std::memory_order_relaxed);
             return;
         }
         void const* const curLevel = static_cast<void const*>(client.getLevel());
@@ -574,19 +675,29 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
 
         if (isChatTop) {
             if (!isBeforePass) return;
+            long long const nowMs = steadyNowMs();
             mChatOpen.store(true, std::memory_order_relaxed);
-            mLastChatOpenMs.store(steadyNowMs(), std::memory_order_relaxed);
+            mLastChatOpenMs.store(nowMs, std::memory_order_relaxed);
+            mInGameHudOrChat.store(true, std::memory_order_relaxed);
+            mLastHudOrChatMs.store(nowMs, std::memory_order_relaxed);
             ChatBehaviorHooks::instance().pollPendingAutoClose(event.screenView());
         } else if (isHudTop) {
             if (isBeforePass) return;
             mChatOpen.store(false, std::memory_order_relaxed);
+            mInGameHudOrChat.store(true, std::memory_order_relaxed);
+            mLastHudOrChatMs.store(steadyNowMs(), std::memory_order_relaxed);
+            if (mPendingUiReload.exchange(false, std::memory_order_acq_rel)) {
+                scheduleUiPackReload();
+            }
         } else {
             mChatOpen.store(false, std::memory_order_relaxed);
+            mInGameHudOrChat.store(false, std::memory_order_relaxed);
             ChatBehaviorHooks::instance().clearChatInputState();
             std::lock_guard lock(mMutex);
             mDraggingScrollbar       = false;
             mSuggestions.reset();
             mLastSuggestionLayout    = {};
+            exitSearchModeLocked(false);
             clearInputSelectionStateLocked();
             mCachedDisplayTextScreen = nullptr;
             mCachedDisplayTextCtrl.reset();
@@ -602,8 +713,9 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
         if (!(sw > 0.0f && sh > 0.0f)) return;
 
         // O(1) fast-path check before copying GuiMessages or formatting timestamps.
-        auto        guiPtr = client.getGuiData();
-        auto const& msgs   = guiPtr->mGuiMessages.get();
+        auto guiPtr = client.getGuiData();
+        if (!guiPtr.get().get()) return;
+        auto const& msgs = guiPtr->mGuiMessages.get();
         std::string firstScratch;
         std::string lastScratch;
         std::string_view firstSv;
@@ -677,6 +789,7 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
                 mDraggingScrollbar       = false;
                 mSuggestions.reset();
                 mLastSuggestionLayout    = {};
+                exitSearchModeLocked(false);
                 clearInputSelectionStateLocked();
                 mCachedDisplayTextScreen = nullptr;
                 mCachedDisplayTextCtrl.reset();
@@ -704,8 +817,10 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
         if (isChatTop) {
             auto* chatCtrl = static_cast<::ChatScreenController*>(event.screenView().mController.get());
             std::shared_ptr<UIControl> displayCtrl = cachedCtrlWeak.lock();
+            auto const                 fontRepoPtr = client.getMinecraftGame().getFontRepository().get();
+            FontRepository const*      fontRepo    = fontRepoPtr.get();
             TextComponent*             displayComp = findDisplayTextComponent(
-                event.screenView(), sameChatScreen, displayCtrl
+                event.screenView(), sameChatScreen, displayCtrl, fontRepo
             );
 
             std::string              curMsg;
@@ -736,7 +851,7 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
                             mInputAllSelected = false;
                             mSelectedTextSnapshot.clear();
                             mPendingCaretPos.reset();
-                            mPendingInputEdit = PendingInputEdit{*ins, true, -1, std::nullopt};
+                            mPendingInputEdit = PendingInputEdit{*ins, !mSearchMode, -1, std::nullopt};
                         } else {
                             mInputAllSelected = false;
                             mSelectedTextSnapshot.clear();
@@ -746,34 +861,52 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
                         mLastObservedInput = curMsg;
                     }
 
-                    mSuggestions.syncFromBedrock(curMsg, rawAutoCompleteTexts, intellisensePending);
-                    bool const knownCmdValid   = mSuggestions.isKnownCommand(curMsg);
                     visState.expectedPlainText = curMsg;
                     visState.allSelected =
                         mInputAllSelected && !curMsg.empty() && (curMsg == mSelectedTextSnapshot);
-                    visState.suggestionTokens  = mSuggestions.items();
-                    visState.selectedToken     = std::string(mSuggestions.selectedToken());
-                    visState.hasUsage          = hasUsage;
-                    visState.knownCommandValid = knownCmdValid;
-                    visState.enableSyntaxColor =
-                        (!curMsg.empty() && curMsg.front() == '/' && curMsg.find("\xC2\xA7") == std::string_view::npos);
-                    if (visState.enableSyntaxColor) {
-                        visState.coloredText =
-                            formatJavaCommandSyntax(curMsg, mSuggestions.items(), hasUsage, knownCmdValid);
-                        if (mSuggestions.active()) {
-                            visState.ghostSuffix = computeInlineGhostSuffix(curMsg, mSuggestions.selectedToken());
-                            visState.enableGhost = !visState.ghostSuffix.empty();
+                    if (mSearchMode) {
+                        mSuggestions.reset();
+                        mLastSuggestionLayout      = {};
+                        visState.enableSyntaxColor = false;
+                        visState.enableGhost       = false;
+                        std::string const activeQuery =
+                            mPendingInputEdit.has_value() ? mPendingInputEdit->text : curMsg;
+                        if (activeQuery != mSearchQuery) {
+                            mSearchQuery = activeQuery;
+                            mHistory.scrollToBottom();
+                        }
+                        if (!activeQuery.empty()) {
+                            skipFrameRender = false;
+                        }
+                    } else {
+                        mSuggestions.syncFromBedrock(curMsg, rawAutoCompleteTexts, intellisensePending);
+                        bool const knownCmdValid   = mSuggestions.isKnownCommand(curMsg);
+                        visState.suggestionTokens  = mSuggestions.items();
+                        visState.selectedToken     = std::string(mSuggestions.selectedToken());
+                        visState.hasUsage          = hasUsage;
+                        visState.knownCommandValid = knownCmdValid;
+                        visState.enableSyntaxColor =
+                            (!curMsg.empty() && curMsg.front() == '/' && curMsg.find("\xC2\xA7") == std::string_view::npos);
+                        if (visState.enableSyntaxColor) {
+                            visState.coloredText =
+                                formatJavaCommandSyntax(curMsg, mSuggestions.items(), hasUsage, knownCmdValid);
+                            if (mSuggestions.active()) {
+                                visState.ghostSuffix = computeInlineGhostSuffix(curMsg, mSuggestions.selectedToken());
+                                visState.enableGhost = !visState.ghostSuffix.empty();
+                            }
                         }
                     }
                     firePendingEdit = mPendingInputEdit.has_value() || mPendingCaretPos.has_value();
                 } else {
                     mSuggestions.reset();
                     mLastSuggestionLayout = {};
+                    exitSearchModeLocked(false);
                     clearInputSelectionStateLocked();
                 }
             }
 
-            ChatBehaviorHooks::instance().updateChatInputState(displayComp, chatCtrl, std::move(visState));
+            void const* const renderCtxVtbl = *reinterpret_cast<void const* const*>(&ctx);
+            ChatBehaviorHooks::instance().updateChatInputState(displayComp, chatCtrl, std::move(visState), renderCtxVtbl);
             if (firePendingEdit) {
                 event.screenView().handleButtonEvent(
                     kButtonMenuAutocompleteId, ::ButtonState::Down, ::FocusImpact::Neutral
@@ -795,8 +928,11 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
 
         ChatConfig            cfgCopy;
         ChatViewLayout        view;
-        bool                  scrollbarActive = false;
+        bool                  scrollbarActive    = false;
         std::optional<size_t> hovered;
+        SearchBarNotice       searchBar;
+        SearchBarLayout       searchBarLayout;
+        bool                  searchCloseHovered = false;
 
         {
             std::lock_guard lock(mMutex);
@@ -805,15 +941,17 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
                 mDraggingScrollbar    = false;
                 mSuggestions.reset();
                 mLastSuggestionLayout = {};
+                exitSearchModeLocked(false);
                 clearInputSelectionStateLocked();
                 ChatBehaviorHooks::instance().clearChatInputState();
                 return;
             }
 
-            auto measure = ChatRenderer::makeMeasureFn(ctx, fontSet, cfgCopy.fontScale);
+            auto             measure = ChatRenderer::makeMeasureFn(ctx, fontSet, cfgCopy.fontScale);
+            std::string_view querySv = (isChatTop && mSearchMode) ? std::string_view(mSearchQuery) : std::string_view{};
             // Authentic Java Edition keeps chat history firmly anchored at cfgCopy.bottomOffset (40.0);
             // command suggestions layer in front via AfterUIRenderEvent without pushing chat upward.
-            view         = mHistory.buildView(sw, sh, isChatTop, nowSec, cfgCopy, measure, -1.0f, fontRev);
+            view = mHistory.buildView(sw, sh, isChatTop, nowSec, cfgCopy, measure, -1.0f, fontRev, querySv);
             if (isChatTop) {
                 mLastView    = view;
                 mLastScreenW = sw;
@@ -822,10 +960,26 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
                     mDraggingScrollbar = false;
                 }
                 scrollbarActive = mDraggingScrollbar;
+
+                if (mSearchMode) {
+                    searchBar.active       = true;
+                    searchBar.query        = mSearchQuery;
+                    searchBar.matchedCount = view.matchedEntryCount;
+                    searchBar.totalCount   = view.totalEntryCount;
+                    searchBarLayout        = ChatRenderer::computeSearchBarLayout(view, sw, sh, cfgCopy);
+                    mLastSearchBarLayout   = searchBarLayout;
+                } else {
+                    mLastSearchBarLayout = {};
+                }
+
                 if (auto mouse = getGuiMousePos(sw, sh)) {
+                    bool inSearchBar =
+                        searchBarLayout.visible && searchBarLayout.barRect.contains(mouse->first, mouse->second);
                     bool inPopup = mLastSuggestionLayout.visible
                                 && mLastSuggestionLayout.popupRect.contains(mouse->first, mouse->second);
-                    if (!inPopup) {
+                    if (inSearchBar) {
+                        searchCloseHovered = searchBarLayout.closeBtnRect.contains(mouse->first, mouse->second);
+                    } else if (!inPopup) {
                         if (ChatHistory::hitTestScrollbar(view, mouse->first, mouse->second)) {
                             scrollbarActive = true;
                         } else if (!mDraggingScrollbar) {
@@ -834,12 +988,25 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
                     }
                 }
             } else {
-                mDraggingScrollbar = false;
+                mDraggingScrollbar   = false;
+                mLastSearchBarLayout = {};
             }
         }
 
         ChatRenderer::render(
-            ctx, ox, oy, view, cfgCopy, fontSet, isChatTop, hovered, hasToast ? &toast : nullptr, scrollbarActive
+            ctx,
+            ox,
+            oy,
+            view,
+            cfgCopy,
+            fontSet,
+            isChatTop,
+            hovered,
+            hasToast ? &toast : nullptr,
+            scrollbarActive,
+            searchBar.active ? &searchBar : nullptr,
+            searchBarLayout.visible ? &searchBarLayout : nullptr,
+            searchCloseHovered
         );
     } catch (...) {
     }
@@ -877,33 +1044,39 @@ void JavaChatMod::renderChatOverlayPass(ll::event::render::AfterUIRenderEvent& e
         Rect                  midCaretLocal;
         bool                  hasMidCaret = false;
         Rect                  selectionLocal;
-        bool                  hasSelection = false;
+        bool                  hasSelection     = false;
+        bool                  searchModeActive = false;
 
         {
             std::lock_guard lock(mMutex);
-            cfgCopy = mConfig;
+            cfgCopy          = mConfig;
             if (!cfgCopy.enabled) return;
+            searchModeActive = mSearchMode;
 
             mLastScreenW = sw;
             mLastScreenH = sh;
 
-            float const inputScale =
-                (geom.valid && geom.fontScale > 0.1f) ? geom.fontScale : cfgCopy.fontScale;
-            auto measure = ChatRenderer::makeMeasureFn(ctx, fontSet, inputScale);
-            layout       = mSuggestions.buildLayout(sw, sh, localInputX, inputScale, measure);
+            if (!searchModeActive) {
+                float const inputScale =
+                    (geom.valid && geom.fontScale > 0.1f) ? geom.fontScale : cfgCopy.fontScale;
+                auto measure = ChatRenderer::makeMeasureFn(ctx, fontSet, inputScale);
+                layout       = mSuggestions.buildLayout(sw, sh, localInputX, inputScale, measure);
 
-            if (auto mouse = getGuiMousePos(sw, sh)) {
-                bool const moved = (std::fabs(mouse->first - mLastHoverMouseX) > 0.5f)
-                                || (std::fabs(mouse->second - mLastHoverMouseY) > 0.5f);
-                if (moved) {
-                    mLastHoverMouseX = mouse->first;
-                    mLastHoverMouseY = mouse->second;
-                    if (auto hitRow = CommandSuggestionState::hitTestRow(layout, mouse->first, mouse->second)) {
-                        if (mSuggestions.setSelectedIndex(*hitRow)) {
-                            layout = mSuggestions.buildLayout(sw, sh, localInputX, inputScale, measure);
+                if (auto mouse = getGuiMousePos(sw, sh)) {
+                    bool const moved = (std::fabs(mouse->first - mLastHoverMouseX) > 0.5f)
+                                    || (std::fabs(mouse->second - mLastHoverMouseY) > 0.5f);
+                    if (moved) {
+                        mLastHoverMouseX = mouse->first;
+                        mLastHoverMouseY = mouse->second;
+                        if (auto hitRow = CommandSuggestionState::hitTestRow(layout, mouse->first, mouse->second)) {
+                            if (mSuggestions.setSelectedIndex(*hitRow)) {
+                                layout = mSuggestions.buildLayout(sw, sh, localInputX, inputScale, measure);
+                            }
                         }
                     }
                 }
+            } else {
+                mLastSuggestionLayout = {};
             }
 
             mLastSuggestionLayout = layout;
@@ -935,7 +1108,9 @@ void JavaChatMod::renderChatOverlayPass(ll::event::render::AfterUIRenderEvent& e
             cfgCopy,
             fontSet,
             hasMidCaret ? &midCaretLocal : nullptr,
-            hasSelection ? &selectionLocal : nullptr
+            hasSelection ? &selectionLocal : nullptr,
+            searchModeActive,
+            sh
         );
     } catch (...) {
     }
@@ -953,6 +1128,12 @@ std::optional<unsigned int> JavaChatMod::handleChatNavButton(
         if (buttonId == kButtonChatPrevMsgId || buttonId == kButtonChatNextMsgId) {
             mInputAllSelected = false;
             mSelectedTextSnapshot.clear();
+            if (mSearchMode) {
+                if (isNewPress) {
+                    mHistory.scrollBy(buttonId == kButtonChatPrevMsgId ? +1 : -1);
+                }
+                return static_cast<unsigned int>(::ui::ViewRequest::ConsumeEvent);
+            }
             if (!mSuggestions.active()) {
                 return std::nullopt; // Fall through to Bedrock sent-message history.
             }
@@ -982,6 +1163,9 @@ std::optional<unsigned int> JavaChatMod::handleChatNavButton(
                 }
                 return static_cast<unsigned int>(::ui::ViewRequest::Refresh)
                      | static_cast<unsigned int>(::ui::ViewRequest::ConsumeEvent);
+            }
+            if (mSearchMode) {
+                return static_cast<unsigned int>(::ui::ViewRequest::ConsumeEvent);
             }
             if (!mSuggestions.active()) {
                 return std::nullopt;
@@ -1124,6 +1308,14 @@ void JavaChatMod::onMouseInput(ll::event::input::MouseInputEvent& event) noexcep
             if (!mConfig.enabled) return;
             auto mouse = getGuiMousePos(mLastScreenW, mLastScreenH);
             if (!mouse) return;
+            if (mSearchMode && mLastSearchBarLayout.visible
+                && mLastSearchBarLayout.barRect.contains(mouse->first, mouse->second)) {
+                if (isLeftDown && mLastSearchBarLayout.closeBtnRect.contains(mouse->first, mouse->second)) {
+                    exitSearchModeLocked(true);
+                }
+                event.cancel();
+                return;
+            }
             // Handle clicks inside the Java command suggestions popup without defocusing text_edit_box.
             if (mLastSuggestionLayout.visible
                 && mLastSuggestionLayout.popupRect.contains(mouse->first, mouse->second)) {
@@ -1164,8 +1356,8 @@ void JavaChatMod::onMouseInput(ll::event::input::MouseInputEvent& event) noexcep
             auto const* entry       = mHistory.findById(clickedLine.entryId);
             if (!entry) return;
 
-            std::optional<std::string> targetUrl =
-                clickedLine.lineUrl.has_value() ? clickedLine.lineUrl : entry->firstUrl;
+            // Only open a URL when the clicked wrapped line actually contains one.
+            std::optional<std::string> targetUrl = clickedLine.lineUrl;
 
             double nowSec = steadyNowSec();
             if (isLeftDown && mConfig.clickToOpenUrl && targetUrl.has_value()) {
@@ -1201,15 +1393,123 @@ void JavaChatMod::onMouseInput(ll::event::input::MouseInputEvent& event) noexcep
 void JavaChatMod::onKeyInput(ll::event::input::KeyInputEvent& event) noexcept {
     try {
         if (mShutdown.load(std::memory_order_relaxed)) return;
-        if (!event.isDown()) return;
-        if (!mChatOpen.load(std::memory_order_relaxed)) return;
-        if (steadyNowMs() - mLastChatOpenMs.load(std::memory_order_relaxed) > 300) return;
+        int const vk = event.keyCode();
+        if (!event.isDown()) {
+            if (vk == 'D' || vk == VK_F3) {
+                mF3DLatched.store(false, std::memory_order_relaxed);
+            }
+            return;
+        }
         if (!isGameForeground()) return;
 
-        int const  vk       = event.keyCode();
         bool const ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         bool const altHeld  = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+        bool const f3Held   = (GetAsyncKeyState(VK_F3) & 0x8000) != 0;
         bool const ctrlOnly = ctrlHeld && !altHeld;
+
+        if (f3Held && !ctrlHeld && !altHeld && vk == 'D') {
+            if (mInGameHudOrChat.load(std::memory_order_relaxed)
+                && steadyNowMs() - mLastHudOrChatMs.load(std::memory_order_relaxed) <= 300) {
+                if (!mF3DLatched.exchange(true, std::memory_order_relaxed)) {
+                    std::lock_guard lock(mMutex);
+                    if (!mConfig.enabled) return;
+                    mHistory.clear();
+                    mDraggingScrollbar = false;
+                    showToastLocked("Cleared chat", steadyNowSec());
+                }
+                event.cancel();
+                return;
+            }
+        }
+
+        if (!mChatOpen.load(std::memory_order_relaxed)) return;
+        if (steadyNowMs() - mLastChatOpenMs.load(std::memory_order_relaxed) > 300) return;
+
+        if (ctrlOnly && vk == 'F') {
+            std::lock_guard lock(mMutex);
+            if (!mConfig.enabled) return;
+            event.cancel();
+            if (!mSearchMode) {
+                std::string draft       = mPendingInputEdit.has_value() ? mPendingInputEdit->text : mLastObservedInput;
+                mSearchMode             = true;
+                mSavedDraftBeforeSearch = std::move(draft);
+                mSearchQuery.clear();
+                mInputAllSelected = false;
+                mSelectedTextSnapshot.clear();
+                mPendingCaretPos.reset();
+                mSuggestions.reset();
+                mLastSuggestionLayout = {};
+                mPendingInputEdit     = PendingInputEdit{"", false, -1, std::nullopt};
+                mLastObservedInput.clear();
+                mHistory.scrollToBottom();
+                ChatBehaviorHooks::instance().setSearchMode(true);
+            } else {
+                exitSearchModeLocked(true);
+            }
+            return;
+        }
+
+        if (vk == VK_ESCAPE) {
+            std::lock_guard lock(mMutex);
+            if (mConfig.enabled && mSearchMode) {
+                exitSearchModeLocked(true);
+                event.cancel();
+                return;
+            }
+        }
+
+        if (ctrlOnly && vk == VK_BACK) {
+            std::string backendText;
+            int         backendCaret = -1;
+            try {
+                if (auto app = ll::service::getAppPlatform()) {
+                    backendText  = app->getTextBoxBackend();
+                    backendCaret = app->getCaretPosition();
+                }
+            } catch (...) {
+            }
+
+            std::lock_guard lock(mMutex);
+            if (!mConfig.enabled) return;
+            event.cancel();
+            if (mInputAllSelected) {
+                mInputAllSelected = false;
+                mPendingInputEdit = PendingInputEdit{"", !mSearchMode, -1, mSelectedTextSnapshot};
+                mSelectedTextSnapshot.clear();
+                mLastObservedInput.clear();
+                mPendingCaretPos.reset();
+                return;
+            }
+
+            std::string baseText;
+            int         baseCaret = -1;
+            if (mPendingInputEdit.has_value()) {
+                baseText  = mPendingInputEdit->text;
+                baseCaret = mPendingInputEdit->caretPos;
+            } else if (backendText.empty() && !mLastObservedInput.empty()) {
+                baseText  = mLastObservedInput;
+                baseCaret = mPendingCaretPos.has_value() ? *mPendingCaretPos : -1;
+            } else {
+                baseText  = backendText;
+                baseCaret = mPendingCaretPos.has_value() ? *mPendingCaretPos : backendCaret;
+            }
+
+            WordDeleteResult res = deletePreviousWordUtf8(baseText, baseCaret);
+            if (res.changed) {
+                size_t newCpCount = 0;
+                size_t pos        = 0;
+                while (pos < res.newText.size()) {
+                    nextUtf8Codepoint(res.newText, pos);
+                    ++newCpCount;
+                }
+                int const outCaret =
+                    (res.newCaretCodepoint >= static_cast<int>(newCpCount)) ? -1 : res.newCaretCodepoint;
+                mPendingCaretPos.reset();
+                mPendingInputEdit  = PendingInputEdit{res.newText, !mSearchMode, outCaret, std::nullopt};
+                mLastObservedInput = res.newText;
+            }
+            return;
+        }
 
         if (vk == VK_PRIOR) { // Page Up
             std::lock_guard lock(mMutex);
@@ -1264,7 +1564,7 @@ void JavaChatMod::onKeyInput(ll::event::input::KeyInputEvent& event) noexcept {
             } else if (ctrlOnly && vk == 'X') {
                 copySnapshot          = mSelectedTextSnapshot;
                 mInputAllSelected     = false;
-                mPendingInputEdit     = PendingInputEdit{"", true, -1, mSelectedTextSnapshot};
+                mPendingInputEdit     = PendingInputEdit{"", !mSearchMode, -1, mSelectedTextSnapshot};
                 mSelectedTextSnapshot.clear();
                 mLastObservedInput.clear();
                 mPendingCaretPos.reset();
@@ -1274,7 +1574,7 @@ void JavaChatMod::onKeyInput(ll::event::input::KeyInputEvent& event) noexcept {
                 event.cancel();
             } else if (vk == VK_BACK || vk == VK_DELETE) {
                 mInputAllSelected = false;
-                mPendingInputEdit = PendingInputEdit{"", true, -1, mSelectedTextSnapshot};
+                mPendingInputEdit = PendingInputEdit{"", !mSearchMode, -1, mSelectedTextSnapshot};
                 mSelectedTextSnapshot.clear();
                 mLastObservedInput.clear();
                 mPendingCaretPos.reset();
@@ -1309,7 +1609,7 @@ void JavaChatMod::onKeyInput(ll::event::input::KeyInputEvent& event) noexcept {
                     mInputAllSelected = false;
                     mSelectedTextSnapshot.clear();
                     mPendingCaretPos.reset();
-                    mPendingInputEdit  = PendingInputEdit{pasted, true, -1, std::nullopt};
+                    mPendingInputEdit  = PendingInputEdit{pasted, !mSearchMode, -1, std::nullopt};
                     mLastObservedInput = pasted;
                 }
             }
@@ -1369,8 +1669,13 @@ std::string JavaChatMod::describeHelp() const {
 bool JavaChatMod::toggleEnabled() {
     std::lock_guard lock(mMutex);
     mConfig.enabled = !mConfig.enabled;
-    if (!mConfig.enabled) mDraggingScrollbar = false;
-    PackPinner::instance().setEnabled(mConfig.enabled && mConfig.overrideServerChatUi);
+    if (!mConfig.enabled) {
+        mDraggingScrollbar = false;
+        exitSearchModeLocked(false);
+        clearInputSelectionStateLocked();
+    }
+    PackPinner::instance().setMode(computePackPinMode(mConfig.enabled, mConfig.overrideServerChatUi));
+    mPendingUiReload.store(true, std::memory_order_release);
     ChatBehaviorHooks::instance().setEnabled(mConfig.enabled);
     saveConfigLocked();
     return mConfig.enabled;
@@ -1402,13 +1707,24 @@ bool JavaChatMod::reloadConfig(std::string& messageOut) {
     }
     {
         std::lock_guard lock(mMutex);
+        bool const      packModeChanged =
+            (mConfig.enabled != loaded.config.enabled)
+            || (mConfig.overrideServerChatUi != loaded.config.overrideServerChatUi);
         mConfig = loaded.config;
         if (!fontOk) {
             mConfig.font = "default";
         }
+        if (!mConfig.enabled) {
+            mDraggingScrollbar = false;
+            exitSearchModeLocked(false);
+            clearInputSelectionStateLocked();
+        }
         mHistory.trimToMax(mConfig.maxHistoryMessages);
-        PackPinner::instance().setEnabled(mConfig.enabled && mConfig.overrideServerChatUi);
+        PackPinner::instance().setMode(computePackPinMode(mConfig.enabled, mConfig.overrideServerChatUi));
         PackPinner::instance().setVerbose(mConfig.verboseLog);
+        if (packModeChanged) {
+            mPendingUiReload.store(true, std::memory_order_release);
+        }
         ChatBehaviorHooks::instance().setEnabled(mConfig.enabled);
         ChatBehaviorHooks::instance().setAutoCloseOnSend(mConfig.autoCloseOnSend);
         ChatBehaviorHooks::instance().setDisableAnimations(mConfig.disableChatAnimations);
@@ -1424,11 +1740,16 @@ bool JavaChatMod::reloadConfig(std::string& messageOut) {
 void JavaChatMod::resetConfig() {
     {
         std::lock_guard lock(mMutex);
-        mConfig = ChatConfig{};
+        bool const      prevEnabled  = mConfig.enabled;
+        bool const      prevOverride = mConfig.overrideServerChatUi;
+        mConfig                      = ChatConfig{};
         sanitizeConfig(mConfig);
         mHistory.trimToMax(mConfig.maxHistoryMessages);
-        PackPinner::instance().setEnabled(mConfig.enabled && mConfig.overrideServerChatUi);
+        PackPinner::instance().setMode(computePackPinMode(mConfig.enabled, mConfig.overrideServerChatUi));
         PackPinner::instance().setVerbose(mConfig.verboseLog);
+        if (prevEnabled != mConfig.enabled || prevOverride != mConfig.overrideServerChatUi) {
+            mPendingUiReload.store(true, std::memory_order_release);
+        }
         ChatBehaviorHooks::instance().setEnabled(mConfig.enabled);
         ChatBehaviorHooks::instance().setAutoCloseOnSend(mConfig.autoCloseOnSend);
         ChatBehaviorHooks::instance().setDisableAnimations(mConfig.disableChatAnimations);

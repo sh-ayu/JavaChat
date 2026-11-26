@@ -2,10 +2,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <iomanip>
+#include <limits>
+#include <locale>
 #include <sstream>
 #include <system_error>
 #include <vector>
@@ -253,9 +257,10 @@ struct JsonParser {
 };
 
 std::string formatFloat(float v) {
-    char buf[32]{};
-    std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(v));
-    std::string out(buf);
+    std::ostringstream oss;
+    oss.imbue(std::locale::classic());
+    oss << std::fixed << std::setprecision(2) << static_cast<double>(v);
+    std::string out = oss.str();
     // Keep at least one decimal place (e.g., 1.0)
     while (out.size() > 3 && out.back() == '0' && out[out.size() - 2] != '.') {
         out.pop_back();
@@ -421,9 +426,11 @@ bool parseConfigJson(std::string_view jsonText, ChatConfig& outConfig, std::stri
             };
             auto readFloat = [&](float& dst) {
                 if (kind == 'n') {
-                    try {
-                        dst = std::stof(val);
-                    } catch (...) {
+                    float parsed = 0.0f;
+                    auto  res    = std::from_chars(val.data(), val.data() + val.size(), parsed);
+                    if (res.ec == std::errc{} && res.ptr == val.data() + val.size() && std::isfinite(parsed)) {
+                        dst = parsed;
+                    } else {
                         warnings.push_back(key + " out of float range");
                     }
                 } else {
@@ -432,9 +439,18 @@ bool parseConfigJson(std::string_view jsonText, ChatConfig& outConfig, std::stri
             };
             auto readInt = [&](int& dst) {
                 if (kind == 'n') {
-                    try {
-                        dst = static_cast<int>(std::lround(std::stod(val)));
-                    } catch (...) {
+                    double parsed = 0.0;
+                    auto   res    = std::from_chars(val.data(), val.data() + val.size(), parsed);
+                    if (res.ec == std::errc{} && res.ptr == val.data() + val.size() && std::isfinite(parsed)) {
+                        double const rounded = std::round(parsed);
+                        double const lo      = static_cast<double>(std::numeric_limits<int>::min());
+                        double const hi      = static_cast<double>(std::numeric_limits<int>::max());
+                        if (rounded >= lo && rounded <= hi) {
+                            dst = static_cast<int>(rounded);
+                        } else {
+                            warnings.push_back(key + " out of int range");
+                        }
+                    } else {
                         warnings.push_back(key + " out of int range");
                     }
                 } else {

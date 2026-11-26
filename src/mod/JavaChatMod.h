@@ -3,6 +3,7 @@
 #include "core/ChatConfig.h"
 #include "core/ChatHistory.h"
 #include "core/CommandSuggestions.h"
+#include "mod/ChatRenderer.h"
 
 #include <atomic>
 #include <chrono>
@@ -87,8 +88,12 @@ private:
     handleChatNavButton(ChatScreenController& chatCtrl, uint32_t buttonId, bool isNewPress) noexcept;
     std::optional<unsigned int>
     handleChatTextEditAfter(ChatScreenController& chatCtrl, int textEditResult) noexcept;
+    void handleSearchExitFromHook(ChatScreenController& chatCtrl) noexcept;
 
+    void exitSearchModeLocked(bool restoreDraft) noexcept;
     void clearInputSelectionStateLocked() noexcept;
+    void scheduleUiPackReload() noexcept;
+    void applyUiPackReloadOnClientThread() noexcept;
     void showToastLocked(std::string text, double nowSec);
     void saveConfigLocked() noexcept;
 
@@ -122,21 +127,29 @@ private:
     std::string                     mLastObservedInput;
     bool                            mInputAllSelected = false;
     std::string                     mSelectedTextSnapshot;
+    bool                            mSearchMode = false;
+    std::string                     mSearchQuery;
+    std::string                     mSavedDraftBeforeSearch;
+    SearchBarLayout                 mLastSearchBarLayout;
     float                           mLastHoverMouseX         = -1.0f;
-    float                      mLastHoverMouseY         = -1.0f;
-    bool                       mDraggingScrollbar       = false;
-    float                      mLastScreenW             = 0.0f;
-    float                      mLastScreenH             = 0.0f;
-    bool                       mWasChatOpen             = false;
-    std::string                mToastText;
-    double                     mToastUntilSec           = 0.0;
-    void const*                mLastLevelPtr            = nullptr;
-    ScreenView const*          mCachedDisplayTextScreen = nullptr;
-    std::weak_ptr<UIControl>   mCachedDisplayTextCtrl;
+    float                           mLastHoverMouseY         = -1.0f;
+    bool                            mDraggingScrollbar       = false;
+    float                           mLastScreenW             = 0.0f;
+    float                           mLastScreenH             = 0.0f;
+    bool                            mWasChatOpen             = false;
+    std::string                     mToastText;
+    double                          mToastUntilSec           = 0.0;
+    void const*                     mLastLevelPtr            = nullptr;
+    ScreenView const*               mCachedDisplayTextScreen = nullptr;
+    std::weak_ptr<UIControl>        mCachedDisplayTextCtrl;
 
     std::atomic<bool>      mShutdown{false};
     std::atomic<bool>      mChatOpen{false};
     std::atomic<long long> mLastChatOpenMs{0};
+    std::atomic<bool>      mInGameHudOrChat{false};
+    std::atomic<long long> mLastHudOrChatMs{0};
+    std::atomic<bool>      mF3DLatched{false};
+    std::atomic<bool>      mPendingUiReload{false};
 };
 
 } // namespace javachat

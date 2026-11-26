@@ -22,11 +22,11 @@ class Logger;
 namespace javachat {
 
 struct FontRenderSet {
-    Font* primary              = nullptr;
-    Font* fallback             = nullptr;
-    bool  checkFallbackPerLine = false;
+    std::shared_ptr<Font> primary;
+    std::shared_ptr<Font> fallback;
+    bool                  checkFallbackPerLine = false;
 
-    Font* selectForText(std::string_view sv) const noexcept;
+    std::shared_ptr<Font> selectForText(std::string_view sv) const noexcept;
 };
 
 // Manages built-in Bedrock fonts and custom .ttf fonts staged into JavaChatUI/font/.

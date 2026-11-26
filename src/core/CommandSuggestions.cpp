@@ -101,6 +101,53 @@ std::string_view normalizeSuggestionForActiveSpan(
     return suggestionToken;
 }
 
+enum class WordCharClass {
+    Whitespace,
+    AsciiWord,
+    Hiragana,
+    Katakana,
+    Kanji,
+    Punctuation,
+    OtherWord
+};
+
+bool isProlongedSoundMark(uint32_t cp) noexcept {
+    return cp == 0x30FC;
+}
+
+WordCharClass classifyWordCodepoint(uint32_t cp) noexcept {
+    if (cp == ' ' || cp == '\t' || cp == 0x3000) {
+        return WordCharClass::Whitespace;
+    }
+    if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') || cp == '_') {
+        return WordCharClass::AsciiWord;
+    }
+    if (cp >= 0x3040 && cp <= 0x309F) {
+        return WordCharClass::Hiragana;
+    }
+    if (cp == 0x30A0 || cp == 0x30FB || (cp >= 0x3001 && cp <= 0x303F)) {
+        return WordCharClass::Punctuation;
+    }
+    if (cp >= 0x30A0 && cp <= 0x30FF) {
+        return WordCharClass::Katakana;
+    }
+    if ((cp >= 0x3400 && cp <= 0x4DBF) || (cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0xF900 && cp <= 0xFAFF)) {
+        return WordCharClass::Kanji;
+    }
+    if ((cp < 0x80) || (cp >= 0xFF01 && cp <= 0xFF0F) || (cp >= 0xFF1A && cp <= 0xFF20)
+        || (cp >= 0xFF3B && cp <= 0xFF40) || (cp >= 0xFF5B && cp <= 0xFF65)) {
+        return WordCharClass::Punctuation;
+    }
+    return WordCharClass::OtherWord;
+}
+
+bool matchesWordTargetClass(WordCharClass target, uint32_t cp) noexcept {
+    if ((target == WordCharClass::Hiragana || target == WordCharClass::Katakana) && isProlongedSoundMark(cp)) {
+        return true;
+    }
+    return classifyWordCodepoint(cp) == target;
+}
+
 } // namespace
 
 std::string extractSuggestionToken(std::string_view rawBedrockText) {
@@ -261,6 +308,55 @@ extractInsertedTextAfterSelectAll(std::string_view selectedBefore, std::string_v
         return std::nullopt;
     }
     return std::string(currentAfter.substr(prefix, delta));
+}
+
+WordDeleteResult deletePreviousWordUtf8(std::string_view text, int caretCodepoint) {
+    struct CpSpan {
+        size_t   byteStart;
+        size_t   byteEnd;
+        uint32_t cp;
+    };
+    std::vector<CpSpan> cps;
+    cps.reserve(text.size());
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t const   start = pos;
+        uint32_t const cp    = nextUtf8Codepoint(text, pos);
+        cps.push_back({start, pos, cp});
+    }
+
+    size_t const caret = (caretCodepoint < 0 || static_cast<size_t>(caretCodepoint) >= cps.size())
+                           ? cps.size()
+                           : static_cast<size_t>(caretCodepoint);
+    if (caret == 0) {
+        return {std::string(text), 0, false};
+    }
+
+    size_t delStart = caret;
+    while (delStart > 0 && classifyWordCodepoint(cps[delStart - 1].cp) == WordCharClass::Whitespace) {
+        --delStart;
+    }
+    if (delStart > 0) {
+        size_t probe = delStart;
+        while (probe > 1 && isProlongedSoundMark(cps[probe - 1].cp)) {
+            --probe;
+        }
+        WordCharClass const targetClass = classifyWordCodepoint(cps[probe - 1].cp);
+        while (delStart > 0 && matchesWordTargetClass(targetClass, cps[delStart - 1].cp)) {
+            --delStart;
+        }
+    }
+
+    size_t const cutByte = (delStart < cps.size()) ? cps[delStart].byteStart : text.size();
+    size_t const remByte = (caret < cps.size()) ? cps[caret].byteStart : text.size();
+
+    std::string out;
+    out.reserve(cutByte + (text.size() - remByte));
+    out.append(text.substr(0, cutByte));
+    if (remByte < text.size()) {
+        out.append(text.substr(remByte));
+    }
+    return {std::move(out), static_cast<int>(delStart), true};
 }
 
 std::string sanitizeClipboardForChat(std::string_view raw, size_t maxCodepoints) {

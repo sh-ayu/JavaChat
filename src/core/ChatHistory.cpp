@@ -76,6 +76,33 @@ float ChatHistory::computeFadeAlpha(double ageSec, bool chatOpen, ChatConfig con
     return static_cast<float>(std::clamp(rem * rem, 0.0, 1.0));
 }
 
+bool ChatHistory::isDurationDiscontinuity(float currDuration, double nowSec) const noexcept {
+    if (mLastGuiSnapshot.empty() || !std::isfinite(currDuration)) return false;
+
+    float const  snapDur = mLastGuiSnapshot.back().duration;
+    double const dtSnap  = std::max(0.0, nowSec - mLastSyncSec);
+    if (std::isfinite(snapDur)) {
+        double const jumpSnap = std::fabs(static_cast<double>(currDuration) - static_cast<double>(snapDur));
+        if (jumpSnap > std::max(0.5, dtSnap * 2.5)) {
+            return true;
+        }
+    }
+
+    if (mHasObservedBack && std::isfinite(mLastObservedBackDuration) && nowSec >= mLastObservedSec) {
+        double const dtObs = nowSec - mLastObservedSec;
+        double const delta = static_cast<double>(currDuration) - static_cast<double>(mLastObservedBackDuration);
+        // Direction reversal (e.g. countdown jumped back up on a fresh identical message, or count-up reset down).
+        if ((mObservedDurationDir < 0 && delta > 0.03) || (mObservedDurationDir > 0 && delta < -0.03)) {
+            return true;
+        }
+        // Sudden jump relative to the previous frame's observation (short dt even long after last sync).
+        if (std::fabs(delta) > std::max(0.5, dtObs * 2.5)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ChatHistory::needsSync(
     size_t           currentCount,
     std::string_view firstFull,
@@ -97,10 +124,23 @@ bool ChatHistory::needsSync(
         || firstFull != front.fullText || lastFull != back.fullText) {
         return true;
     }
-    double dt   = std::max(0.0, nowSec - mLastSyncSec);
-    double jump = std::fabs(static_cast<double>(lastDuration) - static_cast<double>(back.duration));
-    if (std::isfinite(back.duration) && std::isfinite(lastDuration) && jump > std::max(0.5, dt * 2.5)) {
+    if (isDurationDiscontinuity(lastDuration, nowSec)) {
         return true;
+    }
+
+    // Track per-frame duration progression so a later reset back to the initial duration is caught.
+    if (std::isfinite(lastDuration)) {
+        if (mHasObservedBack && std::isfinite(mLastObservedBackDuration) && mObservedDurationDir == 0) {
+            double const delta = static_cast<double>(lastDuration) - static_cast<double>(mLastObservedBackDuration);
+            if (delta < -0.01) {
+                mObservedDurationDir = -1;
+            } else if (delta > 0.01) {
+                mObservedDurationDir = +1;
+            }
+        }
+        mLastObservedBackDuration = lastDuration;
+        mLastObservedSec          = nowSec;
+        mHasObservedBack          = true;
     }
     return false;
 }
@@ -193,13 +233,8 @@ size_t ChatHistory::syncFromGuiMessages(
         }
         if (allMatch) {
             // Same list at capacity. Check if a brand-new identical message pushed the oldest one out:
-            // whether mDuration counts down or up, a fresh message causes a discontinuity far larger
-            // than elapsed wall time since the last frame.
-            float  prevDur = mLastGuiSnapshot.back().duration;
-            float  currDur = current.back().duration;
-            double dt      = std::max(0.0, nowSec - mLastSyncSec);
-            double jump    = std::fabs(static_cast<double>(currDur) - static_cast<double>(prevDur));
-            if (std::isfinite(prevDur) && std::isfinite(currDur) && jump > std::max(0.5, dt * 2.5)) {
+            // catches both large jumps from last sync and direction reversals / jumps vs last frame observation.
+            if (isDurationDiscontinuity(current.back().duration, nowSec)) {
                 startNew = currN - 1;
             } else {
                 startNew = currN; // No change
@@ -246,7 +281,11 @@ size_t ChatHistory::syncFromGuiMessages(
     }
 
     mLastGuiSnapshot.assign(current.begin(), current.end());
-    mLastSyncSec = nowSec;
+    mLastSyncSec              = nowSec;
+    mLastObservedBackDuration = current.back().duration;
+    mLastObservedSec          = nowSec;
+    mObservedDurationDir      = 0;
+    mHasObservedBack          = std::isfinite(current.back().duration);
     return added;
 }
 
@@ -279,6 +318,10 @@ void ChatHistory::trimToMax(int maxHistoryMessages) noexcept {
 
 void ChatHistory::resetSyncCursor() noexcept {
     mLastGuiSnapshot.clear();
+    mLastObservedBackDuration = 0.0f;
+    mLastObservedSec          = 0.0;
+    mObservedDurationDir      = 0;
+    mHasObservedBack          = false;
 }
 
 void ChatHistory::scrollBy(int deltaLines) noexcept {
@@ -329,7 +372,8 @@ ChatViewLayout ChatHistory::buildView(
     ChatConfig const&    cfg,
     TextMeasureFn const& measure,
     float                bottomOffsetOverride,
-    uint32_t             fontRevision
+    uint32_t             fontRevision,
+    std::string_view     searchQuery
 ) {
     ChatViewLayout view;
     if (!(screenW > 0.0f && screenH > 0.0f)) return view;
@@ -343,6 +387,15 @@ ChatViewLayout ChatHistory::buildView(
 
     float maxPanelW = std::min(cfg.width, std::max(80.0f, screenW - cfg.leftOffset - 4.0f));
     float availH    = screenH - effectiveBottom - 8.0f;
+
+    float const panelW      = maxPanelW;
+    float const panelBottom = screenH - effectiveBottom;
+    float const panelLeft   = cfg.leftOffset;
+    float const panelRight  = panelLeft + panelW;
+    view.panelRect          = Rect{panelLeft, panelBottom, panelRight, panelBottom};
+    view.totalEntryCount    = static_cast<int>(mEntries.size());
+    view.matchedEntryCount  = view.totalEntryCount;
+
     if (availH < 12.0f) return view;
 
     float maxH = chatOpen ? cfg.openHeight : cfg.closedHeight;
@@ -385,12 +438,8 @@ ChatViewLayout ChatHistory::buildView(
         view.clampedScroll     = 0;
         if (visCount == 0) return view;
 
-        float const panelW      = maxPanelW;
-        float const panelBottom = screenH - effectiveBottom;
-        float const panelTop    = panelBottom - static_cast<float>(visCount) * lineH;
-        float const panelLeft   = cfg.leftOffset;
-        float const panelRight  = panelLeft + panelW;
-        view.panelRect          = Rect{panelLeft, panelTop, panelRight, panelBottom};
+        float const panelTop = panelBottom - static_cast<float>(visCount) * lineH;
+        view.panelRect       = Rect{panelLeft, panelTop, panelRight, panelBottom};
 
         view.lines.reserve(static_cast<size_t>(visCount));
         for (int i = 0; i < visCount; ++i) {
@@ -406,7 +455,7 @@ ChatViewLayout ChatHistory::buildView(
             rl.rect        = Rect{panelLeft, y0, panelRight, y0 + lineH};
             rl.bgAlpha     = cfg.backgroundOpacity * ref.fadeAlpha;
             rl.textAlpha   = cfg.textOpacity * ref.fadeAlpha;
-            rl.hasUrl      = wl.lineUrl.has_value() || e.firstUrl.has_value();
+            rl.hasUrl      = wl.lineUrl.has_value();
             rl.isFirstLine = (ref.lineIdx == 0);
             view.lines.push_back(std::move(rl));
         }
@@ -414,6 +463,12 @@ ChatViewLayout ChatHistory::buildView(
     }
 
     // Open chat: compute lightweight per-entry line spans without copying all 500 entries' strings.
+    bool const filtering = !searchQuery.empty();
+    view.isFiltered      = filtering;
+    if (filtering) {
+        view.matchedEntryCount = 0;
+    }
+
     struct EntrySpan {
         size_t entryIdx;
         int    startLine;
@@ -423,7 +478,15 @@ ChatViewLayout ChatHistory::buildView(
     spans.reserve(mEntries.size());
     int totalLines = 0;
     for (size_t ei = 0; ei < mEntries.size(); ++ei) {
-        auto const& wrapped = getWrappedLinesCached(mEntries[ei], textMaxW, cfg, measure, fontRevision);
+        auto const& e = mEntries[ei];
+        if (filtering) {
+            bool const matched = containsIgnoreCaseAscii(e.plainText, searchQuery)
+                              || (cfg.showTimestamps && !e.timestampText.empty()
+                                  && containsIgnoreCaseAscii(stripFormatting(e.timestampText), searchQuery));
+            if (!matched) continue;
+            ++view.matchedEntryCount;
+        }
+        auto const& wrapped = getWrappedLinesCached(e, textMaxW, cfg, measure, fontRevision);
         int const   lc      = static_cast<int>(wrapped.size());
         spans.push_back({ei, totalLines, lc});
         totalLines += lc;
@@ -484,12 +547,8 @@ ChatViewLayout ChatHistory::buildView(
     }
 
     // Authentic Java Edition uses a consistent chat box width (default 320px).
-    float const panelW      = maxPanelW;
-    float const panelBottom = screenH - effectiveBottom;
-    float const panelTop    = panelBottom - static_cast<float>(visCount) * lineH;
-    float const panelLeft   = cfg.leftOffset;
-    float const panelRight  = panelLeft + panelW;
-    view.panelRect          = Rect{panelLeft, panelTop, panelRight, panelBottom};
+    float const panelTop = panelBottom - static_cast<float>(visCount) * lineH;
+    view.panelRect       = Rect{panelLeft, panelTop, panelRight, panelBottom};
 
     float const contentRight = panelRight - (scrollBarW + scrollGap);
     view.lines.reserve(static_cast<size_t>(visCount));
@@ -508,12 +567,12 @@ ChatViewLayout ChatHistory::buildView(
             RenderedChatLine rl;
             rl.entryId     = e.id;
             rl.messageType = e.messageType;
-            rl.text        = wl.text;
+            rl.text        = filtering ? highlightFormattedMatches(wl.text, searchQuery, 'e') : wl.text;
             rl.lineUrl     = wl.lineUrl;
             rl.rect        = Rect{panelLeft, y0, contentRight, y0 + lineH};
             rl.bgAlpha     = cfg.backgroundOpacity;
             rl.textAlpha   = cfg.textOpacity;
-            rl.hasUrl      = wl.lineUrl.has_value() || e.firstUrl.has_value();
+            rl.hasUrl      = wl.lineUrl.has_value();
             rl.isFirstLine = (wi == 0);
             view.lines.push_back(std::move(rl));
         }

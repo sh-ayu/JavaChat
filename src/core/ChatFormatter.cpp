@@ -44,6 +44,14 @@ void appendSection(std::string& out, char code) {
     out.push_back(code);
 }
 
+unsigned char foldAsciiByte(char ch) noexcept {
+    unsigned char c = static_cast<unsigned char>(ch);
+    if (c >= 'A' && c <= 'Z') {
+        return static_cast<unsigned char>(c - 'A' + 'a');
+    }
+    return c;
+}
+
 } // namespace
 
 uint32_t nextUtf8Codepoint(std::string_view s, size_t& pos) noexcept {
@@ -146,6 +154,137 @@ std::string stripFormatting(std::string_view text) {
     return out;
 }
 
+bool containsIgnoreCaseAscii(std::string_view haystack, std::string_view needle) noexcept {
+    if (needle.empty()) return true;
+    if (haystack.size() < needle.size()) return false;
+
+    size_t const maxStart = haystack.size() - needle.size();
+    for (size_t i = 0; i <= maxStart; ++i) {
+        bool match = true;
+        for (size_t j = 0; j < needle.size(); ++j) {
+            if (foldAsciiByte(haystack[i + j]) != foldAsciiByte(needle[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+std::string highlightFormattedMatches(
+    std::string_view formattedText,
+    std::string_view query,
+    char             highlightColorCode
+) {
+    if (formattedText.empty() || query.empty()) {
+        return std::string(formattedText);
+    }
+
+    std::string              plain;
+    plain.reserve(formattedText.size());
+    std::vector<size_t>      rawIdx;
+    rawIdx.reserve(formattedText.size());
+    std::vector<FormatState> stateBeforeRaw(formattedText.size() + 1);
+
+    FormatState curState;
+    size_t      pos = 0;
+    while (pos < formattedText.size()) {
+        stateBeforeRaw[pos] = curState;
+        size_t seqLen       = 0;
+        char   code         = 0;
+        if (isSectionCodeAt(formattedText, pos, seqLen, code)) {
+            curState.apply(code);
+            for (size_t k = 1; k < seqLen && (pos + k) <= formattedText.size(); ++k) {
+                stateBeforeRaw[pos + k] = curState;
+            }
+            pos += seqLen;
+            continue;
+        }
+        unsigned char c = static_cast<unsigned char>(formattedText[pos]);
+        if (c == '\r' || (c < 0x20 && c != '\n' && c != '\t')) {
+            ++pos;
+            continue;
+        }
+        plain.push_back(c == '\t' ? ' ' : formattedText[pos]);
+        rawIdx.push_back(pos);
+        ++pos;
+    }
+    stateBeforeRaw[formattedText.size()] = curState;
+
+    if (plain.size() < query.size()) {
+        return std::string(formattedText);
+    }
+
+    struct Span {
+        size_t start;
+        size_t end;
+    };
+    std::vector<Span> matches;
+    size_t const      maxStart = plain.size() - query.size();
+    size_t            searchAt = 0;
+    while (searchAt <= maxStart) {
+        bool hit = true;
+        for (size_t j = 0; j < query.size(); ++j) {
+            if (foldAsciiByte(plain[searchAt + j]) != foldAsciiByte(query[j])) {
+                hit = false;
+                break;
+            }
+        }
+        if (hit) {
+            matches.push_back({searchAt, searchAt + query.size()});
+            searchAt += query.size();
+        } else {
+            ++searchAt;
+        }
+    }
+
+    if (matches.empty()) {
+        return std::string(formattedText);
+    }
+
+    std::string out;
+    out.reserve(formattedText.size() + matches.size() * 16);
+
+    size_t rawCursor   = 0;
+    size_t matchIdx    = 0;
+    bool   inHighlight = false;
+
+    for (size_t p = 0; p < plain.size(); ++p) {
+        size_t const rawPos = rawIdx[p];
+        if (!inHighlight && rawPos > rawCursor) {
+            out.append(formattedText.substr(rawCursor, rawPos - rawCursor));
+        }
+        rawCursor = rawPos;
+
+        if (!inHighlight && matchIdx < matches.size() && p == matches[matchIdx].start) {
+            FormatState const& enterState = stateBeforeRaw[rawPos];
+            appendSection(out, highlightColorCode);
+            if (enterState.obf) appendSection(out, 'k');
+            if (enterState.bold) appendSection(out, 'l');
+            if (enterState.italic) appendSection(out, 'o');
+            inHighlight = true;
+        }
+
+        out.push_back(formattedText[rawPos]);
+        rawCursor = rawPos + 1;
+
+        if (inHighlight && p + 1 == matches[matchIdx].end) {
+            inHighlight = false;
+            ++matchIdx;
+            if (p + 1 < plain.size()) {
+                appendSection(out, 'r');
+                out.append(stateBeforeRaw[rawCursor].toPrefix());
+            }
+        }
+    }
+
+    if (rawCursor < formattedText.size()) {
+        out.append(formattedText.substr(rawCursor));
+    }
+    return out;
+}
+
 std::optional<std::string> extractFirstUrl(std::string_view text) {
     std::string clean = stripFormatting(text);
     size_t      pos   = 0;
@@ -178,9 +317,14 @@ std::optional<std::string> extractFirstUrl(std::string_view text) {
             url.pop_back();
         }
         size_t schemeEnd = url.find("://");
-        if (schemeEnd != std::string::npos && url.size() > schemeEnd + 3) {
-            std::string_view hostPart = std::string_view(url).substr(schemeEnd + 3);
-            if (!hostPart.empty() && hostPart.find('.') != std::string_view::npos) {
+        constexpr size_t kMaxUrlLength = 2048;
+        if (schemeEnd != std::string::npos && url.size() > schemeEnd + 3 && url.size() <= kMaxUrlLength) {
+            std::string_view rest      = std::string_view(url).substr(schemeEnd + 3);
+            size_t const     pathStart = rest.find_first_of("/?#");
+            std::string_view authority = (pathStart == std::string_view::npos) ? rest : rest.substr(0, pathStart);
+            if (!authority.empty() && authority.find('@') == std::string_view::npos
+                && authority.find('.') != std::string_view::npos
+                && authority.front() != '.' && authority.back() != '.') {
                 return url;
             }
         }

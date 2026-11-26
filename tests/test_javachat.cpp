@@ -189,6 +189,14 @@ void testConfigParseAndRoundTrip() {
     // Malformed JSON rejected
     ChatConfig bad;
     CHECK(!parseConfigJson("{not valid json", bad, &warn));
+
+    // Out-of-range integer value safely warned without lround UB
+    ChatConfig bigInt;
+    warn.clear();
+    CHECK(parseConfigJson(R"({"maxHistoryMessages": 1e30, "width": 300.0})", bigInt, &warn));
+    CHECK(!warn.empty());
+    CHECK(bigInt.maxHistoryMessages == 500);
+    CHECK_NEAR(bigInt.width, 300.0f, 0.01f);
 }
 
 void testConfigFileSaveLoadAndCorruptBackup() {
@@ -250,6 +258,13 @@ void testFormatterStripAndUrls() {
     CHECK(!extractFirstUrl("file:///C:/Windows/calc.exe").has_value());
     CHECK(!extractFirstUrl("javascript:alert(1)").has_value());
     CHECK(!extractFirstUrl("just plain text without link").has_value());
+
+    // Spoofed userinfo (@) URLs and overlong (>2048) URLs rejected, while path @ (e.g. YouTube) is allowed.
+    CHECK(!extractFirstUrl("https://trusted.example.com@evil.example.com/login").has_value());
+    auto yt = extractFirstUrl("https://youtube.com/@minecraft");
+    CHECK(yt.has_value() && *yt == "https://youtube.com/@minecraft");
+    std::string hugeUrl = "https://example.com/" + std::string(2050, 'a');
+    CHECK(!extractFirstUrl(hugeUrl).has_value());
 }
 
 void testFormatterWrapAndFormattingCarryOver() {
@@ -637,6 +652,20 @@ void testMultiUrlPerLineExtraction() {
         CHECK(foundUrls[0] == "https://a.example");
         CHECK(foundUrls[1] == "https://b.example");
     }
+
+    // Wrapped line without a URL must NOT set hasUrl or lineUrl even if another line of the entry has a URL.
+    ChatHistory h2;
+    h2.pushMessage("prefix words without any link here https://only-second.example", 1.0, cfg);
+    auto v2 = h2.buildView(640.0f, 360.0f, true, 2.0, cfg, mono);
+    CHECK(v2.lines.size() >= 2);
+    CHECK(!v2.lines.front().lineUrl.has_value());
+    CHECK(!v2.lines.front().hasUrl);
+    bool anyHasUrl = false;
+    for (auto const& l : v2.lines) {
+        CHECK(l.hasUrl == l.lineUrl.has_value());
+        if (l.hasUrl) anyHasUrl = true;
+    }
+    CHECK(anyHasUrl);
 }
 
 void testOptimizationNeedsSyncFontRevisionAndZeroFade() {
@@ -678,6 +707,30 @@ void testOptimizationNeedsSyncFontRevisionAndZeroFade() {
     };
     h.syncFromGuiMessages(sSame, 5.0, cfg);
     CHECK(h.needsSync(2, "msg-2", 1, "msg-2", 1, 10.0f, 5.1)); // identical ring jump detected
+
+    // Regression: full ring buffer with identical messages aging down, then a fresh identical message resets duration back to 10.0
+    std::vector<GuiMessageSnapshot> sFull = {
+        {"dup", 10.0f, 1},
+        {"dup", 10.0f, 1},
+        {"dup", 10.0f, 1},
+    };
+    ChatHistory hFull;
+    ChatConfig  dupCfg = cfg;
+    dupCfg.compactDuplicates = true;
+    CHECK(hFull.syncFromGuiMessages(sFull, 10.0, dupCfg) == 3);
+    CHECK(hFull.entries().back().repeatCount == 3);
+    // Simulate several frames of normal countdown aging (10.0 -> 9.0 -> 5.0)
+    CHECK(!hFull.needsSync(3, "dup", 1, "dup", 1, 9.0f, 11.0));
+    CHECK(!hFull.needsSync(3, "dup", 1, "dup", 1, 5.0f, 15.0));
+    // Now a fresh identical message arrives at t=15.05, resetting back duration to 10.0 (same as last synced!)
+    CHECK(hFull.needsSync(3, "dup", 1, "dup", 1, 10.0f, 15.05));
+    std::vector<GuiMessageSnapshot> sFullReset = {
+        {"dup", 5.0f, 1},
+        {"dup", 5.0f, 1},
+        {"dup", 10.0f, 1},
+    };
+    CHECK(hFull.syncFromGuiMessages(sFullReset, 15.05, dupCfg) == 1);
+    CHECK(hFull.entries().back().repeatCount == 4);
 
     // hasVisibleClosedMessages respects fadeDelaySec + fadeDurationSec
     CHECK(h.hasVisibleClosedMessages(13.9, cfg));
@@ -952,6 +1005,184 @@ void testFastTypingSuggestionSyncAndKnownCommands() {
     CHECK(!state.isKnownCommand("/gamemode"));
 }
 
+void testWordDeletionUtf8() {
+    using namespace javachat;
+
+    {
+        auto r = deletePreviousWordUtf8("", -1);
+        CHECK(!r.changed && r.newText.empty() && r.newCaretCodepoint == 0);
+        auto r0 = deletePreviousWordUtf8("hello", 0);
+        CHECK(!r0.changed && r0.newText == "hello" && r0.newCaretCodepoint == 0);
+    }
+
+    // Command chaining: "/gamemode creative" -> "/gamemode " -> "/" -> ""
+    {
+        auto r1 = deletePreviousWordUtf8("/gamemode creative", -1);
+        CHECK(r1.changed && r1.newText == "/gamemode " && r1.newCaretCodepoint == 10);
+        auto r2 = deletePreviousWordUtf8(r1.newText, r1.newCaretCodepoint);
+        CHECK(r2.changed && r2.newText == "/" && r2.newCaretCodepoint == 1);
+        auto r3 = deletePreviousWordUtf8(r2.newText, r2.newCaretCodepoint);
+        CHECK(r3.changed && r3.newText.empty() && r3.newCaretCodepoint == 0);
+        auto r4 = deletePreviousWordUtf8(r3.newText, r3.newCaretCodepoint);
+        CHECK(!r4.changed && r4.newText.empty() && r4.newCaretCodepoint == 0);
+    }
+
+    // Trailing spaces & namespaces & selectors
+    {
+        auto ws = deletePreviousWordUtf8("hello   ", -1);
+        CHECK(ws.changed && ws.newText.empty() && ws.newCaretCodepoint == 0);
+
+        auto ns = deletePreviousWordUtf8("minecraft:diamond_sword", -1);
+        CHECK(ns.changed && ns.newText == "minecraft:" && ns.newCaretCodepoint == 10);
+
+        auto sel = deletePreviousWordUtf8("@e[type=zombie", -1);
+        CHECK(sel.changed && sel.newText == "@e[type=" && sel.newCaretCodepoint == 8);
+    }
+
+    // Mid-string caret positions
+    {
+        auto mid1 = deletePreviousWordUtf8("foo bar baz", 7);
+        CHECK(mid1.changed && mid1.newText == "foo  baz" && mid1.newCaretCodepoint == 4);
+
+        auto mid2 = deletePreviousWordUtf8("hello world", 5);
+        CHECK(mid2.changed && mid2.newText == " world" && mid2.newCaretCodepoint == 0);
+
+        auto mid3 = deletePreviousWordUtf8("   hello", 5);
+        CHECK(mid3.changed && mid3.newText == "   llo" && mid3.newCaretCodepoint == 3);
+    }
+
+    // Japanese UTF-8 character classes (Hiragana, Katakana, Kanji, prolonged mark, U+3000, punctuation)
+    {
+        auto j1 = deletePreviousWordUtf8("こんにちは世界です", -1);
+        CHECK(j1.changed && j1.newText == "こんにちは世界" && j1.newCaretCodepoint == 7);
+        auto j2 = deletePreviousWordUtf8(j1.newText, j1.newCaretCodepoint);
+        CHECK(j2.changed && j2.newText == "こんにちは" && j2.newCaretCodepoint == 5);
+        auto j3 = deletePreviousWordUtf8(j2.newText, j2.newCaretCodepoint);
+        CHECK(j3.changed && j3.newText.empty() && j3.newCaretCodepoint == 0);
+
+        auto kata = deletePreviousWordUtf8("ゲームスタート", -1);
+        CHECK(kata.changed && kata.newText.empty() && kata.newCaretCodepoint == 0);
+
+        auto hiraLong = deletePreviousWordUtf8("テスト　らーめん", -1);
+        CHECK(hiraLong.changed && hiraLong.newText == "テスト　" && hiraLong.newCaretCodepoint == 4);
+        auto hiraLong2 = deletePreviousWordUtf8("らー", -1);
+        CHECK(hiraLong2.changed && hiraLong2.newText.empty() && hiraLong2.newCaretCodepoint == 0);
+
+        auto dotSep = deletePreviousWordUtf8("カタカナ・テスト", -1);
+        CHECK(dotSep.changed && dotSep.newText == "カタカナ・" && dotSep.newCaretCodepoint == 5);
+    }
+
+    // Invalid UTF-8 bytes do not hang or crash
+    {
+        std::string corrupt("\xFF\xFE" "abc", 5);
+        auto        rc = deletePreviousWordUtf8(corrupt, -1);
+        CHECK(rc.changed && rc.newText == std::string("\xFF\xFE", 2) && rc.newCaretCodepoint == 2);
+    }
+}
+
+void testSearchFilterAndHighlight() {
+    using namespace javachat;
+
+    // ASCII case folding & UTF-8 matching
+    CHECK(containsIgnoreCaseAscii("Hello World", ""));
+    CHECK(containsIgnoreCaseAscii("Hello World", "wOrLd"));
+    CHECK(!containsIgnoreCaseAscii("Hello", "Hello World"));
+    CHECK(containsIgnoreCaseAscii("<Alice> ダイヤモンド発見！", "ダイヤ"));
+    CHECK(!containsIgnoreCaseAscii("<Alice> ダイヤモンド発見！", "エメラルド"));
+
+    // Highlight formatting preservation
+    {
+        std::string const s1 = "\xC2\xA7" "aHello World";
+        std::string const h1 = highlightFormattedMatches(s1, "world", 'e');
+        CHECK(stripFormatting(h1) == stripFormatting(s1));
+        CHECK(h1.find("\xC2\xA7" "eWorld") != std::string::npos);
+
+        // Bold + color restored after highlighted word before trailing text
+        std::string const s2 = "\xC2\xA7" "b\xC2\xA7" "lHello World Test";
+        std::string const h2 = highlightFormattedMatches(s2, "world", 'e');
+        CHECK(stripFormatting(h2) == "Hello World Test");
+        CHECK(h2.find("\xC2\xA7" "e\xC2\xA7" "lWorld\xC2\xA7" "r\xC2\xA7" "b\xC2\xA7" "l") != std::string::npos);
+
+        // Inline § code inside match boundary is overridden while active state after match restores §c
+        std::string const s3 = "\xC2\xA7" "aHel\xC2\xA7" "clo ok";
+        std::string const h3 = highlightFormattedMatches(s3, "hello", 'e');
+        CHECK(stripFormatting(h3) == "Hello ok");
+        CHECK(h3.find("\xC2\xA7" "r\xC2\xA7" "c ok") != std::string::npos);
+
+        // Multiple matches & no match pass-through
+        std::string const s4 = "foo bar FOO";
+        std::string const h4 = highlightFormattedMatches(s4, "FOO", 'e');
+        CHECK(stripFormatting(h4) == "foo bar FOO");
+        CHECK(h4 != s4);
+        CHECK(highlightFormattedMatches(s4, "missing", 'e') == s4);
+    }
+
+    // ChatHistory::buildView filtering & highlights
+    {
+        ChatConfig cfg;
+        cfg.compactDuplicates = false;
+        cfg.width             = 320.0f;
+        cfg.bottomOffset      = 40.0f;
+        auto measure          = [](std::string_view sv) { return estimateTextWidth(sv, 1.0f); };
+
+        ChatHistory hist;
+        hist.pushMessage("\xC2\xA7" "a[Alice] Diamond", 10.0, cfg, 1, "\xC2\xA7" "8[12:34] \xC2\xA7" "r");
+        hist.pushMessage("[Bob] Iron", 11.0, cfg, 1, "\xC2\xA7" "8[12:35] \xC2\xA7" "r");
+        hist.pushMessage("[Alice] \xC2\xA7" "bEmerald", 12.0, cfg, 1, "\xC2\xA7" "8[12:36] \xC2\xA7" "r");
+        hist.pushMessage("[System] ダイヤ発見", 13.0, cfg, 1, "\xC2\xA7" "8[12:37] \xC2\xA7" "r");
+
+        auto allView = hist.buildView(640.0f, 360.0f, true, 14.0, cfg, measure, -1.0f, 1);
+        CHECK(!allView.isFiltered);
+        CHECK(allView.matchedEntryCount == 4);
+        CHECK(allView.totalEntryCount == 4);
+        CHECK(allView.lines.size() == 4);
+
+        auto aliceView = hist.buildView(640.0f, 360.0f, true, 14.0, cfg, measure, -1.0f, 1, "alice");
+        CHECK(aliceView.isFiltered);
+        CHECK(aliceView.matchedEntryCount == 2);
+        CHECK(aliceView.totalEntryCount == 4);
+        CHECK(aliceView.lines.size() == 2);
+        CHECK(aliceView.lines[0].text.find("\xC2\xA7" "eAlice") != std::string::npos);
+        CHECK(stripFormatting(aliceView.lines[1].text) == "[Alice] Emerald");
+        // Click hit-test on filtered view still resolves underlying ChatEntry by entryId
+        float const midX = (aliceView.lines[0].rect.x0 + aliceView.lines[0].rect.x1) * 0.5f;
+        float const midY = (aliceView.lines[0].rect.y0 + aliceView.lines[0].rect.y1) * 0.5f;
+        auto const  hit  = ChatHistory::hitTestLine(aliceView, midX, midY);
+        CHECK(hit.has_value() && *hit == 0);
+        auto const* entry = hist.findById(aliceView.lines[*hit].entryId);
+        CHECK(entry != nullptr && entry->plainText == "[Alice] Diamond");
+
+        auto jpView = hist.buildView(640.0f, 360.0f, true, 14.0, cfg, measure, -1.0f, 1, "ダイヤ");
+        CHECK(jpView.isFiltered && jpView.matchedEntryCount == 1 && jpView.lines.size() == 1);
+
+        // Zero matches preserves panel width and bottom anchor for search bar placement
+        auto zeroView = hist.buildView(640.0f, 360.0f, true, 14.0, cfg, measure, -1.0f, 1, "notfound");
+        CHECK(zeroView.isFiltered);
+        CHECK(zeroView.matchedEntryCount == 0);
+        CHECK(zeroView.totalEntryCount == 4);
+        CHECK(zeroView.lines.empty());
+        CHECK_NEAR(zeroView.panelRect.width(), 320.0f, 0.5f);
+        CHECK_NEAR(zeroView.panelRect.y1, 360.0f - cfg.bottomOffset, 0.5f);
+
+        // Closed HUD does NOT filter
+        auto closedView = hist.buildView(640.0f, 360.0f, false, 14.0, cfg, measure, -1.0f, 1, "alice");
+        CHECK(!closedView.isFiltered);
+        CHECK(closedView.lines.size() == 4);
+
+        // Timestamp matching follows showTimestamps flag
+        auto tsOff = hist.buildView(640.0f, 360.0f, true, 14.0, cfg, measure, -1.0f, 1, "12:35");
+        CHECK(tsOff.matchedEntryCount == 0);
+        cfg.showTimestamps = true;
+        auto tsOn = hist.buildView(640.0f, 360.0f, true, 14.0, cfg, measure, -1.0f, 1, "12:35");
+        CHECK(tsOn.matchedEntryCount == 1 && tsOn.lines.size() == 1);
+
+        // Clearing history resets visible entries while keeping sync cursor intact
+        hist.clear();
+        CHECK(hist.size() == 0);
+        CHECK(!hist.needsSync(0, "", 0, "", 0, 0.0f, 15.0));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -970,6 +1201,8 @@ int main() {
     testCommandSuggestions();
     testSelectAllAndClipboardHelpers();
     testFastTypingSuggestionSyncAndKnownCommands();
+    testWordDeletionUtf8();
+    testSearchFilterAndHighlight();
 
     std::cout << "==== " << gPassed << " passed, " << gFailed << " failed ====\n";
     return gFailed == 0 ? 0 : 1;

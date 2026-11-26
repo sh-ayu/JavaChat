@@ -23,10 +23,11 @@ JavaChat splits the work cleanly:
 - **Authentic Java Edition look & feel**:
   - Bottom-left translucent pure-black message strips (`backgroundOpacity: 0.50`, `lineSpacing: 0.0` for crisp 9px rows at 1.0x scale) with drop-shadowed text—no distracting borders or extra sidebars.
   - Consistent vertical alignment (`bottomOffset: 40.0` above the hotbar/status bar) whether chat is open or closed, with zero jump when opening chat or showing command suggestions (suggestions render cleanly in front of chat history just like Java Edition).
-  - Authentic 12px command/chat input bar with Brigadier syntax coloring (`/` and valid command names gray, incomplete/unknown command names red, subsequent arguments cycling Java's 5-color palette: aqua/yellow/green/light-purple/gold), pale-gray inline ghost completion, `_` / `|` caret, and full **`Ctrl+A` select-all editing** (`Ctrl+A`, `Ctrl+C`, `Ctrl+X`, `Ctrl+V`, `Backspace`/`Delete`, direct typing & IME replacement).
+  - Authentic 12px command/chat input bar with Brigadier syntax coloring (`/` and valid command names gray, incomplete/unknown command names red, subsequent arguments cycling Java's 5-color palette: aqua/yellow/green/light-purple/gold), pale-gray inline ghost completion, `_` / `|` caret, full **`Ctrl+A` select-all editing** (`Ctrl+A`, `Ctrl+C`, `Ctrl+X`, `Ctrl+V`, `Backspace`/`Delete`, direct typing & IME replacement), and **`Ctrl+Backspace` word-by-word deletion** (UTF-8 / CJK & command aware).
   - Narrow content-fitted command suggestions popup aligned directly above the active token, displaying tokens only (`#FFFF55` yellow selected, `#AAAAAA` gray unselected) with `↑`/`↓`, `Tab`/`Shift+Tab`, mouse hover, click, and wheel scrolling.
   - Transparent backdrop when chat is open (no full-screen dimming).
-  - **Auto-clear on world/server switch**: Clears stale chat history from previous servers when joining or leaving a world (`clearHistoryOnWorldSwitch`).
+  - **World/server switch clear & `F3+D` chat clear**: Automatically clears stale history on world/server switch (`clearHistoryOnWorldSwitch`), and supports Java Edition's **`F3+D`** shortcut in-game to clear the overlay chat history without losing Bedrock's sent-command history.
+  - **In-chat history search (`Ctrl+F`)**: Toggle live case-insensitive substring filtering over stored chat history with Japanese IME support, match count badge (`(matched/total)`), non-width-changing `§e` match highlights, clickable `[x]` button, `↑`/`↓` result scrolling, and `Esc` / `Ctrl+F` exit that restores your unsent draft.
   - **Single-`Esc` close**: Pressing `Esc` once closes chat immediately instead of only deselecting the text box.
   - **Auto-close on send**: Sending a chat message or command automatically closes chat just like Java Edition, without misfiring on IME composition `Enter` (`autoCloseOnSend`).
   - **Zero open/close animations**: Removes Bedrock's screen slide/fade animations and loading bars so chat opens and closes instantaneously (`disableChatAnimations`).
@@ -180,7 +181,7 @@ powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 
 - **Java `hoverEvent` / `clickEvent`**: Minecraft Bedrock's network protocol (`TextPacket`) does not transmit Java Edition hover tooltips or command-run click actions, so only URL links present in message text and clipboard copy are supported.
 - **Hot-unloading**: Like most LeviLamina client UI mods, updating or removing `JavaChat.dll` requires restarting the game (live unload is disabled).
-- **Toggling OFF mid-session**: `/jchat toggle` immediately hides the C++ overlay, while restoring Bedrock's vanilla JSON-UI screen requires rejoining the world or restarting so the resource pack stack recomposes.
+- **Toggling OFF mid-session**: `/jchat toggle` immediately hides the C++ overlay, and closing the chat screen automatically strips `JavaChatUI` from the pack stack and reloads Bedrock's UI definitions to restore vanilla chat.
 - **Future OreUI migration**: If a future Bedrock update fully migrates in-game chat from JSON-UI (`chat_screen.json`) to OreUI, the input bar portion will need an update.
 
 ---

@@ -72,9 +72,12 @@ struct ChatViewLayout {
     Rect                          scrollbarTrackRect;
     Rect                          scrollbarThumbRect;
     bool                          showScrollbar     = false;
+    bool                          isFiltered        = false;
     int                           totalWrappedLines = 0;
     int                           maxVisibleLines   = 0;
     int                           clampedScroll     = 0;
+    int                           matchedEntryCount = 0;
+    int                           totalEntryCount   = 0;
     std::vector<RenderedChatLine> lines; // Top-to-bottom for drawing
 };
 
@@ -144,7 +147,8 @@ public:
         ChatConfig const&    cfg,
         TextMeasureFn const& measure,
         float                bottomOffsetOverride = -1.0f,
-        uint32_t             fontRevision         = 0
+        uint32_t             fontRevision         = 0,
+        std::string_view     searchQuery          = {}
     );
 
     // Return the index in `view.lines` containing (mx, my), or std::nullopt.
@@ -157,15 +161,21 @@ public:
     static float computeFadeAlpha(double ageSec, bool chatOpen, ChatConfig const& cfg) noexcept;
 
 private:
+    bool isDurationDiscontinuity(float currDuration, double nowSec) const noexcept;
+
     std::deque<ChatEntry>           mEntries;
     std::vector<GuiMessageSnapshot> mLastGuiSnapshot;
-    double                          mLastSyncSec = 0.0;
-    uint64_t                        mNextId      = 1;
-    int                             mScrollLines = 0;
-    bool                            mScrollToTopPending = false;
-    uint64_t                        mAnchoredEntryId    = 0;
-    size_t                          mAnchoredLineIndex  = 0;
-    bool                            mAnchorPending      = false;
+    double                          mLastSyncSec              = 0.0;
+    mutable float                   mLastObservedBackDuration = 0.0f;
+    mutable double                  mLastObservedSec          = 0.0;
+    mutable int                     mObservedDurationDir      = 0;
+    mutable bool                    mHasObservedBack          = false;
+    uint64_t                        mNextId                   = 1;
+    int                             mScrollLines              = 0;
+    bool                            mScrollToTopPending       = false;
+    uint64_t                        mAnchoredEntryId          = 0;
+    size_t                          mAnchoredLineIndex        = 0;
+    bool                            mAnchorPending            = false;
 };
 
 } // namespace javachat

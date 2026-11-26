@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-and-validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate manifests and check for local path leaks
+        shell: pwsh
+        run: |
+          python -c '
+          import json, pathlib, re, subprocess, tomllib
+
+          root = pathlib.Path(".")
+          with open(root / "lip.toml", "rb") as f:
+              lip = tomllib.load(f)
+          assert lip.get("format") == 4, lip
+          ver = lip["version"]
+
+          tooth = json.loads((root / "tooth.json").read_text(encoding="utf-8"))
+          manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+          pack_manifest = json.loads((root / "resource_packs" / "JavaChatUI" / "manifest.json").read_text(encoding="utf-8"))
+          config_sample = json.loads((root / "config.sample.json").read_text(encoding="utf-8"))
+          xmake_txt = (root / "xmake.lua").read_text(encoding="utf-8")
+          m = re.search(r"modVersion\s*=\s*\"([^\"]+)\"", xmake_txt)
+
+          assert tooth["version"] == ver, tooth["version"]
+          assert manifest["version"] == ver, manifest["version"]
+          assert m and m.group(1) == ver, m
+          assert "header" in pack_manifest and "modules" in pack_manifest
+          assert isinstance(config_sample, dict)
+
+          tracked = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+          leaks = []
+          for rel in tracked:
+              p = root / rel
+              if p.is_file() and p.suffix.lower() in {".cpp", ".h", ".lua", ".json", ".toml", ".md", ".ps1", ".yml", ".yaml"}:
+                  txt = p.read_text(encoding="utf-8", errors="ignore")
+                  if re.search(r"[A-Za-z]:[/\\\\]Users[/\\\\]", txt) or re.search(r"LeviLauncher[/\\\\]Instances[/\\\\][^<]", txt):
+                      leaks.append(rel)
+          assert not leaks, f"Local path leak detected in: {leaks}"
+          print(f"Manifest & path-leak validation PASSED (version={ver}, checked {len(tracked)} tracked files)")
+          '
+
+      - uses: xmake-io/github-action-setup-xmake@v1
+
+      - name: Build and run jchat_tests
+        shell: pwsh
+        run: |
+          xmake f -m release --with_mod=n -y
+          xmake build jchat_tests
+          xmake run jchat_tests

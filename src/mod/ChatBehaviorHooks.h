@@ -54,6 +54,7 @@ public:
         std::function<std::optional<unsigned int>(::ChatScreenController&, uint32_t buttonId, bool isNewPress)>;
     using ChatTextEditAfterHandler =
         std::function<std::optional<unsigned int>(::ChatScreenController&, int textEditResult)>;
+    using ChatSearchExitHandler = std::function<void(::ChatScreenController&)>;
 
     static ChatBehaviorHooks& instance() noexcept;
 
@@ -70,10 +71,17 @@ public:
     void setAutoCloseOnSend(bool enabled) noexcept;
     void setDisableAnimations(bool disabled) noexcept;
     void setKeepHudVisibleInChat(bool keep) noexcept;
+    void setSearchMode(bool active) noexcept;
 
     void setChatNavHandler(ChatNavHandler handler) noexcept;
     void setChatTextEditAfterHandler(ChatTextEditAfterHandler handler) noexcept;
-    void updateChatInputState(void* displayTextComp, void* chatController, InputVisualState state) noexcept;
+    void setChatSearchExitHandler(ChatSearchExitHandler handler) noexcept;
+    void updateChatInputState(
+        void*            displayTextComp,
+        void*            chatController,
+        InputVisualState state,
+        void const*      expectedRenderCtxVtbl = nullptr
+    ) noexcept;
     void clearChatInputState() noexcept;
     CapturedInputGeometry consumeCapturedInputGeometry() noexcept;
 
@@ -93,12 +101,13 @@ public:
     void                       onScreenEntranceBefore(void const* scenePtr, bool& doScreenTransitions) noexcept;
     void                       onScreenExitBefore(void const* scenePtr, void const* pushedScenePtr, bool& doScreenTransitions) noexcept;
     bool                       shouldTreatAsIgnoreTop(void const* scenePtr) const noexcept;
-    bool                       isSendTriggerEvent(void const* screenEventPtr) const noexcept;
-    void                       onAfterSendTrigger(void* controllerPtr, unsigned int viewRequestFlags) noexcept;
+    bool                        isSendTriggerEvent(void const* screenEventPtr) const noexcept;
+    void                        onAfterSendTrigger(void* controllerPtr, unsigned int viewRequestFlags) noexcept;
+    std::optional<unsigned int> onChatSearchEventBefore(void* controllerPtr, void const* screenEventPtr) noexcept;
     std::optional<unsigned int> onChatNavButtonBefore(void* controllerPtr, void const* screenEventPtr) noexcept;
     std::optional<unsigned int> onChatTextEditAfter(void* controllerPtr, int textEditResult) noexcept;
 
-    bool shouldHookDisplayText(void const* textCompPtr) const noexcept;
+    bool shouldHookDisplayText(void const* textCompPtr, void const* renderContextPtr = nullptr) const noexcept;
     void processDisplayTextAfterRender(
         void*  textCompPtr,
         void*  renderContextPtr,
@@ -114,28 +123,31 @@ private:
     ll::io::Logger*        mLogger = nullptr;
     std::atomic<bool>      mShutdown{false};
     std::atomic<bool>      mEnabled{true};
-    std::atomic<bool>      mAutoCloseOnSend{true};
-    std::atomic<bool>      mDisableAnimations{true};
-    std::atomic<bool>      mKeepHudVisibleInChat{true};
-    std::atomic<bool>      mEntranceHookInstalled{false};
-    std::atomic<bool>      mExitHookInstalled{false};
-    std::atomic<bool>      mHandleEventHookInstalled{false};
-    std::atomic<bool>      mTextRenderHookInstalled{false};
-    std::atomic<bool>      mIgnoreAsTopHookInstalled{false};
-    std::atomic<bool>      mIgnoreAsTopAttempted{false};
-    std::atomic<bool>      mLoggedAnchorMismatch{false};
-    std::mutex             mIgnoreAsTopMutex;
-    void*                  mIgnoreAsTopTarget = nullptr;
-    std::atomic<bool>      mJustExitedChat{false};
-    std::atomic<bool>      mSuppressedHudExit{false};
-    std::atomic<void*>     mPendingCloseCtrl{nullptr};
-    std::atomic<long long> mPendingCloseDeadlineMs{0};
+    std::atomic<bool>        mAutoCloseOnSend{true};
+    std::atomic<bool>        mDisableAnimations{true};
+    std::atomic<bool>        mKeepHudVisibleInChat{true};
+    std::atomic<bool>        mSearchMode{false};
+    std::atomic<bool>        mEntranceHookInstalled{false};
+    std::atomic<bool>        mExitHookInstalled{false};
+    std::atomic<bool>        mHandleEventHookInstalled{false};
+    std::atomic<bool>        mTextRenderHookInstalled{false};
+    std::atomic<bool>        mIgnoreAsTopHookInstalled{false};
+    std::atomic<bool>        mIgnoreAsTopAttempted{false};
+    std::atomic<bool>        mLoggedAnchorMismatch{false};
+    std::mutex               mIgnoreAsTopMutex;
+    void*                    mIgnoreAsTopTarget = nullptr;
+    std::atomic<bool>        mJustExitedChat{false};
+    std::atomic<bool>        mSuppressedHudExit{false};
+    std::atomic<void*>       mPendingCloseCtrl{nullptr};
+    std::atomic<long long>   mPendingCloseDeadlineMs{0};
 
     std::atomic<void*>       mTrackedDisplayTextComp{nullptr};
     std::atomic<void*>       mTrackedChatCtrl{nullptr};
+    std::atomic<void const*> mTrackedRenderCtxVtbl{nullptr};
     std::mutex               mNavMutex;
     ChatNavHandler           mChatNavHandler;
     ChatTextEditAfterHandler mChatTextEditAfterHandler;
+    ChatSearchExitHandler    mChatSearchExitHandler;
     std::mutex               mInputVisualMutex;
     InputVisualState         mInputVisualState;
     CapturedInputGeometry    mCapturedGeom;
