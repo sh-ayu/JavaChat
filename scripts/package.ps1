@@ -38,6 +38,9 @@ $requiredFiles = @(
     (Join-Path $repoRoot "LICENSE"),
     (Join-Path $repoRoot "README.md"),
     (Join-Path $repoRoot "README_JA.md"),
+    (Join-Path $repoRoot "docs\screenshots\bedrock-chat.png"),
+    (Join-Path $repoRoot "docs\screenshots\java-style-chat.png"),
+    (Join-Path $repoRoot "docs\screenshots\command-suggestions.png"),
     (Join-Path $binDir "resource_packs\JavaChatUI\manifest.json"),
     (Join-Path $binDir "resource_packs\JavaChatUI\ui\chat_screen.json"),
     (Join-Path $binDir "resource_packs\JavaChatUI\ui\hud_screen.json")
@@ -59,6 +62,7 @@ if (Test-Path $zipPath)   { Remove-Item -Force $zipPath }
 
 New-Item -ItemType Directory -Force -Path $stageMod | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $stageMod "resource_packs") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $stageMod "docs") | Out-Null
 
 Copy-Item (Join-Path $binDir "JavaChat.dll")        -Destination $stageMod -Force
 Copy-Item (Join-Path $repoRoot "manifest.json")     -Destination $stageMod -Force
@@ -66,6 +70,7 @@ Copy-Item (Join-Path $repoRoot "config.sample.json") -Destination $stageMod -For
 Copy-Item (Join-Path $repoRoot "LICENSE")           -Destination $stageMod -Force
 Copy-Item (Join-Path $repoRoot "README.md")         -Destination $stageMod -Force
 Copy-Item (Join-Path $repoRoot "README_JA.md")      -Destination $stageMod -Force
+Copy-Item (Join-Path $repoRoot "docs\screenshots")  -Destination (Join-Path $stageMod "docs") -Recurse -Force
 Copy-Item (Join-Path $binDir "resource_packs\JavaChatUI") -Destination (Join-Path $stageMod "resource_packs") -Recurse -Force
 
 Compress-Archive -Path $stageMod -DestinationPath $zipPath -CompressionLevel Optimal

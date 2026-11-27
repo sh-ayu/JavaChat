@@ -8,6 +8,20 @@ A lightweight **LeviLamina client mod** for **Minecraft Bedrock Edition** (Windo
 
 ---
 
+## Screenshots
+
+Use `/jchat toggle` to switch between the Java-style chat and the default Bedrock chat.
+
+| JavaChat enabled | JavaChat disabled |
+| --- | --- |
+| ![Java-style chat with a slim input bar](docs/screenshots/java-style-chat.png) | ![Default Bedrock chat with a settings button next to the input field](docs/screenshots/bedrock-chat.png) |
+
+**Command suggestions**
+
+![Java-style autocomplete with the gamemode suggestion highlighted in yellow](docs/screenshots/command-suggestions.png)
+
+---
+
 ## Why JavaChat? (Hybrid Architecture)
 
 Opening chat in Bedrock Edition often stutters because `chat_screen.json` rebuilds a large scrollable message stack, header bar, host command panels, chat settings popups, and sometimes heavy server-provided sidebars every time you press `T` or `/`.
@@ -181,7 +195,7 @@ powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 
 - **Java `hoverEvent` / `clickEvent`**: Minecraft Bedrock's network protocol (`TextPacket`) does not transmit Java Edition hover tooltips or command-run click actions, so only URL links present in message text and clipboard copy are supported.
 - **Hot-unloading**: Like most LeviLamina client UI mods, updating or removing `JavaChat.dll` requires restarting the game (live unload is disabled).
-- **Toggling OFF mid-session**: `/jchat toggle` immediately hides the C++ overlay, and closing the chat screen automatically strips `JavaChatUI` from the pack stack and reloads Bedrock's UI definitions to restore vanilla chat.
+- **Live `/jchat toggle` switching**: Toggling JavaChat ON/OFF immediately switches both the chat screen (`$jchat_enabled` routing) and top-left vanilla HUD chat (`#jchat_vanilla_hud_visible`) with zero rejoin or restart required.
 - **Future OreUI migration**: If a future Bedrock update fully migrates in-game chat from JSON-UI (`chat_screen.json`) to OreUI, the input bar portion will need an update.
 
 ---

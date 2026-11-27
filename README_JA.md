@@ -8,6 +8,20 @@ Minecraft Bedrock（統合版 / Windows x64）の重いチャット画面を、*
 
 ---
 
+## スクリーンショット
+
+`/jchat toggle` で、Java 風チャットと統合版標準のチャットを切り替えられます。
+
+| JavaChat 有効 | JavaChat 無効 |
+| --- | --- |
+| ![細い入力欄の Java 風チャット](docs/screenshots/java-style-chat.png) | ![入力欄の横に設定ボタンがある統合版標準のチャット](docs/screenshots/bedrock-chat.png) |
+
+**コマンド補完**
+
+![gamemode の候補が黄色で表示された Java 風のコマンド補完](docs/screenshots/command-suggestions.png)
+
+---
+
 ## なぜ軽くなるのか？（ハイブリッド構成）
 
 統合版で `T` や `/` を押すたびに重くなる最大の理由は、バニラの `chat_screen.json` が毎回「大量の履歴スクロールリスト・ヘッダー・ホストメニュー・設定ポップアップ・（マルチサーバーでは独自サイドバー）」を再生成・レイアウト計算しているためです。
@@ -181,7 +195,7 @@ powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 
 - **Java 版の `hoverEvent` / `clickEvent`**: 統合版の通信プロトコル（`TextPacket`）にはホバー詳細やクリックコマンド情報が含まれないため、メッセージ内 URL の起動とクリップボードコピーのみ対応しています。
 - **ライブアンロード非対応**: MOD の更新・削除時はゲームを再起動してください。
-- **ゲーム中の `/jchat toggle` OFF**: C++ 側のオーバーレイを即座に隠し、チャット画面を閉じるとリソースパックスタックから `JavaChatUI` を外して UI 定義を再読み込みし、バニラのチャット UI を自動で復帰させます。
+- **ゲーム中の `/jchat toggle` 即時切り替え**: `/jchat toggle` で ON / OFF を切り替えると、チャット画面（`$jchat_enabled` ルーティング）と左上バニラ HUD チャット（`#jchat_vanilla_hud_visible`）の両方がワールド再参加や再起動なしで即座に切り替わります。
 - **将来の OreUI 移行**: 将来のアップデートでチャット画面が OreUI へ完全移行された場合、`chat_screen.json` による入力欄カスタマイズは影響を受ける可能性があります。
 
 ---
