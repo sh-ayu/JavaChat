@@ -245,6 +245,17 @@ void registerChatCommands(std::weak_ptr<ll::mod::Mod> weakMod) {
             out.success("JavaChat: clearHistoryOnWorldSwitch = {}", p.value ? "true" : "false");
         }
     );
+
+    cmd.overload<BoolValueParam>(weakMod).text("heads").required("value").execute(
+        [](CommandOrigin const&, CommandOutput& out, BoolValueParam const& p) {
+            JavaChatMod::instance().setChatHeads(p.value);
+            out.success(
+                "JavaChat: chatHeads = {}{}",
+                p.value ? "true" : "false",
+                p.value ? " (requires the ChatHeads mod: lip install github.com/sh-ayu/ChatHeads)" : ""
+            );
+        }
+    );
 }
 
 } // namespace javachat

@@ -2,6 +2,13 @@
 
 All notable changes to **JavaChat** will be documented in this file.
 
+## [1.2.0] - 2026-11-27
+
+- **Player heads in chat** via the new companion mod [ChatHeads](https://github.com/sh-ayu/ChatHeads). When `ChatHeads.dll` is loaded, JavaChat draws each sender's face to the left of the first line of their message, in both closed HUD chat and open chat, and indents wrapped lines to match. Senders come from `GuiMessage` author/username metadata or ChatHeads' server-format name detection.
+- New `chatHeads` config key (default `true`) and `/jchat heads <true|false>` command; `/jchat status` reports whether ChatHeads is active.
+- There is no link-time dependency: ChatHeads is discovered at runtime (`GetModuleHandleExW`, API v1), and JavaChat behaves exactly as before without it.
+- Duplicate compaction (`[xN]`) no longer merges identical lines from different senders.
+
 ## [1.1.1] - 2026-11-27
 
 - Fix `/jchat toggle` so the chat input and HUD return to the default Bedrock UI when JavaChat is disabled, without restarting or rejoining.

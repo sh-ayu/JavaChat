@@ -1,5 +1,7 @@
 #include "mod/ChatRenderer.h"
 
+#include "mod/ChatHeadsBridge.h"
+
 #include <algorithm>
 #include <cmath>
 #include <optional>
@@ -216,7 +218,7 @@ void ChatRenderer::render(
                     float const effectiveGlyphH = 10.0f * cfg.fontScale;
                     float const textYOffset     = std::floor((line.rect.height() - effectiveGlyphH) * 0.5f * 2.0f) * 0.5f;
                     Rect        textRect{
-                        line.rect.x0 + padX,
+                        line.rect.x0 + padX + line.textIndent,
                         line.rect.y0 + textYOffset,
                         line.rect.x1 - 2.0f,
                         line.rect.y1 + 2.0f
@@ -235,6 +237,18 @@ void ChatRenderer::render(
                 }
 
                 ctx.flushText(0.016f, std::nullopt);
+            }
+
+            // ChatHeads integration: player head left of the first line of each attributed message.
+            if (cfg.chatHeads) {
+                auto&       heads    = ChatHeadsBridge::instance();
+                float const headSize = std::round(heads.headSize() * cfg.fontScale);
+                for (auto const& line : view.lines) {
+                    if (line.headKey.empty() || line.textIndent <= 0.0f || line.textAlpha <= 0.001f) continue;
+                    float const hx = line.rect.x0 + padX;
+                    float const hy = line.rect.y0 + std::floor((line.rect.height() - headSize) * 0.5f);
+                    heads.draw(ctx, line.headKey, hx + originX, hy + originY, headSize, line.textAlpha);
+                }
             }
         }
 

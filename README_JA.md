@@ -60,6 +60,9 @@ JavaChat では役割を明確に分離しています：
   - **クリック操作**（入力欄のフォーカスを外さずに実行）：
     - `http://` / `https://` を含む行を左クリック → ブラウザで開く（折り返された行ごとの URL に対応）。
     - 通常行を左クリック／任意の行を右クリック → `§` コードを除去した本文をクリップボードへコピー。
+- **プレイヤーの頭表示（Chat Heads 連携）**
+  - 連携 MOD **[ChatHeads](https://github.com/sh-ayu/ChatHeads)** を入れると、Java 版「Chat Heads」のように、各発言の左に送信者の顔（8×8 ＋帽子レイヤー）を表示します。閉じた HUD チャットにも開いたチャットにも出ます。送信者は、メッセージの送信者情報・送信者名・`[Admin] Steve: hi` のようなサーバー独自の書式から判定します。退出したプレイヤーの顔も残り、折り返した行もきれいに字下げされます（`chatHeads`、`/jchat heads`）。
+  - JavaChat は実行時に `ChatHeads.dll` を検出するだけなので、必須の依存関係ではありません。ChatHeads がなければこれまでどおりに動作します。
 - **サーバー配布 UI の上書き**
   - `ResourcePackManager::composeFullStack` を `HookPriority::High` でフックし、`JavaChatUI` をスタック先頭（index 0）に自動固定。マルチサーバー独自の重いチャット UI があっても上書きできます（`overrideServerChatUi` で無効化可）。
 
@@ -126,6 +129,7 @@ lip install github.com/sh-ayu/JavaChat
 | `/jchat clickcopy <true\|false>` | クリックコピーの ON / OFF |
 | `/jchat clickurl <true\|false>` | URL クリック起動の ON / OFF |
 | `/jchat clearonswitch <true\|false>` | ワールド・サーバー切り替え時の履歴クリアの ON / OFF |
+| `/jchat heads <true\|false>` | 発言の横のプレイヤーの頭表示の ON / OFF（[ChatHeads](https://github.com/sh-ayu/ChatHeads) MOD が必要） |
 
 ---
 
@@ -160,6 +164,7 @@ lip install github.com/sh-ayu/JavaChat
 | `keepHudVisibleInChat` | `true` | チャットを開いている間も `hud_screen` や他 MOD の HUD を維持 |
 | `font` | `"default"` | 内蔵フォント（`default`/`smooth`/`unicode`/`MinecraftTen`/`rune`/`SmoothSmall`）または `.ttf` パス／ファイル名 |
 | `clearHistoryOnWorldSwitch` | `true` | ワールド・サーバー切り替え時に履歴を消去 |
+| `chatHeads` | `true` | [ChatHeads](https://github.com/sh-ayu/ChatHeads) MOD が入っている場合にプレイヤーの頭を表示 |
 | `verboseLog` | `false` | 詳細ログを出力 |
 
 ---

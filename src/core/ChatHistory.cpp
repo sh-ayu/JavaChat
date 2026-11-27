@@ -27,7 +27,8 @@ std::vector<CachedWrappedLine> const& getWrappedLinesCached(
     float                textMaxW,
     ChatConfig const&    cfg,
     TextMeasureFn const& measure,
-    uint32_t             fontRevision
+    uint32_t             fontRevision,
+    float                headIndent
 ) {
     bool const hit = !e.cachedWrappedLines.empty()
                   && std::fabs(e.cachedMaxWidth - textMaxW) < 0.05f
@@ -35,10 +36,11 @@ std::vector<CachedWrappedLine> const& getWrappedLinesCached(
                   && e.cachedRepeatCount == e.repeatCount
                   && e.cachedFontRevision == fontRevision
                   && e.cachedTimestamps == cfg.showTimestamps
-                  && e.cachedCompact == cfg.compactDuplicates;
+                  && e.cachedCompact == cfg.compactDuplicates
+                  && std::fabs(e.cachedHeadIndent - headIndent) < 0.05f;
     if (!hit) {
         std::string display = buildDisplayText(e, cfg);
-        auto        rawLines = wrapFormattedText(display, textMaxW, measure);
+        auto        rawLines = wrapFormattedText(display, std::max(24.0f, textMaxW - headIndent), measure);
         e.cachedWrappedLines.clear();
         e.cachedWrappedLines.reserve(rawLines.size());
         bool const mightHaveUrl = e.firstUrl.has_value();
@@ -56,6 +58,7 @@ std::vector<CachedWrappedLine> const& getWrappedLinesCached(
         e.cachedFontRevision = fontRevision;
         e.cachedTimestamps   = cfg.showTimestamps;
         e.cachedCompact      = cfg.compactDuplicates;
+        e.cachedHeadIndent   = headIndent;
     }
     return e.cachedWrappedLines;
 }
@@ -155,11 +158,13 @@ void ChatHistory::pushMessage(
     double            nowSec,
     ChatConfig const& cfg,
     int               messageType,
-    std::string_view  timestampPrefix
+    std::string_view  timestampPrefix,
+    std::string_view  headKey
 ) {
     if (fullText.empty()) return;
 
-    if (cfg.compactDuplicates && !mEntries.empty() && mEntries.back().rawText == fullText) {
+    if (cfg.compactDuplicates && !mEntries.empty() && mEntries.back().rawText == fullText
+        && mEntries.back().headKey == headKey) {
         auto& back = mEntries.back();
         ++back.repeatCount;
         back.receivedAtSec = nowSec;
@@ -176,6 +181,7 @@ void ChatHistory::pushMessage(
     entry.receivedAtSec = nowSec;
     entry.repeatCount   = 1;
     entry.messageType   = messageType;
+    entry.headKey.assign(headKey);
     mEntries.push_back(std::move(entry));
 
     size_t cap     = static_cast<size_t>(std::max(cfg.maxHistoryMessages, 1));
@@ -197,7 +203,8 @@ size_t ChatHistory::syncFromGuiMessages(
     std::span<GuiMessageSnapshot const> current,
     double                              nowSec,
     ChatConfig const&                   cfg,
-    std::string_view                    timestampPrefix
+    std::string_view                    timestampPrefix,
+    HeadKeyResolver const&              headResolver
 ) {
     if (current.empty()) {
         mLastGuiSnapshot.clear();
@@ -276,7 +283,8 @@ size_t ChatHistory::syncFromGuiMessages(
 
     size_t added = 0;
     for (size_t i = startNew; i < currN; ++i) {
-        pushMessage(current[i].fullText, nowSec, cfg, current[i].messageType, timestampPrefix);
+        std::string headKey = headResolver ? headResolver(current[i]) : std::string{};
+        pushMessage(current[i].fullText, nowSec, cfg, current[i].messageType, timestampPrefix, headKey);
         ++added;
     }
 
@@ -373,9 +381,12 @@ ChatViewLayout ChatHistory::buildView(
     TextMeasureFn const& measure,
     float                bottomOffsetOverride,
     uint32_t             fontRevision,
-    std::string_view     searchQuery
+    std::string_view     searchQuery,
+    float                headIndent
 ) {
     ChatViewLayout view;
+    if (!(headIndent > 0.0f) || !std::isfinite(headIndent)) headIndent = 0.0f;
+    auto indentFor = [headIndent](ChatEntry const& e) { return e.headKey.empty() ? 0.0f : headIndent; };
     if (!(screenW > 0.0f && screenH > 0.0f)) return view;
 
     float const padX            = 4.0f;
@@ -425,7 +436,7 @@ ChatViewLayout ChatHistory::buildView(
             auto const& e    = mEntries[ei];
             float       fade = computeFadeAlpha(nowSec - e.receivedAtSec, false, cfg);
             if (fade <= 0.001f) break;
-            auto const& wrapped = getWrappedLinesCached(e, textMaxW, cfg, measure, fontRevision);
+            auto const& wrapped = getWrappedLinesCached(e, textMaxW, cfg, measure, fontRevision, indentFor(e));
             for (size_t wi = wrapped.size(); wi-- > 0;) {
                 rev.push_back({ei, wi, fade});
                 if (static_cast<int>(rev.size()) >= maxVisible) break;
@@ -457,6 +468,8 @@ ChatViewLayout ChatHistory::buildView(
             rl.textAlpha   = cfg.textOpacity * ref.fadeAlpha;
             rl.hasUrl      = wl.lineUrl.has_value();
             rl.isFirstLine = (ref.lineIdx == 0);
+            rl.textIndent  = indentFor(e);
+            if (rl.isFirstLine && rl.textIndent > 0.0f) rl.headKey = e.headKey;
             view.lines.push_back(std::move(rl));
         }
         return view;
@@ -486,7 +499,7 @@ ChatViewLayout ChatHistory::buildView(
             if (!matched) continue;
             ++view.matchedEntryCount;
         }
-        auto const& wrapped = getWrappedLinesCached(e, textMaxW, cfg, measure, fontRevision);
+        auto const& wrapped = getWrappedLinesCached(e, textMaxW, cfg, measure, fontRevision, indentFor(e));
         int const   lc      = static_cast<int>(wrapped.size());
         spans.push_back({ei, totalLines, lc});
         totalLines += lc;
@@ -574,6 +587,8 @@ ChatViewLayout ChatHistory::buildView(
             rl.textAlpha   = cfg.textOpacity;
             rl.hasUrl      = wl.lineUrl.has_value();
             rl.isFirstLine = (wi == 0);
+            rl.textIndent  = indentFor(e);
+            if (rl.isFirstLine && rl.textIndent > 0.0f) rl.headKey = e.headKey;
             view.lines.push_back(std::move(rl));
         }
     }

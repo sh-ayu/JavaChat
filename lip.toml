@@ -1,6 +1,6 @@
 format = 4
 id = "github.com/sh-ayu/JavaChat"
-version = "1.1.1"
+version = "1.2.0"
 
 [info]
 name = "JavaChat"

@@ -23,6 +23,7 @@
   "autoCloseOnSend": true,
   "disableChatAnimations": true,
   "keepHudVisibleInChat": true,
+  "chatHeads": true,
   "font": "default",
   "clearHistoryOnWorldSwitch": true,
   "verboseLog": false

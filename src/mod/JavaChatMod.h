@@ -71,6 +71,7 @@ public:
     void                    setDisableChatAnimations(bool disabled);
     void                    setKeepHudVisibleInChat(bool keep);
     void                    setClearHistoryOnWorldSwitch(bool enabled);
+    void                    setChatHeads(bool enabled);
     bool                    setFont(std::string const& spec, std::string& messageOut);
     std::string             describeFonts();
 

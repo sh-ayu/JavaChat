@@ -2,6 +2,7 @@
 
 #include "mod/ChatBehaviorHooks.h"
 #include "mod/ChatCommands.h"
+#include "mod/ChatHeadsBridge.h"
 #include "mod/ChatFontManager.h"
 #include "mod/ChatRenderer.h"
 #include "mod/PackPinner.h"
@@ -726,10 +727,18 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
                 snap.fullText    = std::string(extractGuiMessageText(gm, scratch));
                 snap.duration    = gm.mDuration;
                 snap.messageType = static_cast<int>(gm.mType);
+                snap.username    = gm.mUsername.get();
+                snap.authorXuid  = gm.mAuthorXuid.get();
                 incoming.push_back(std::move(snap));
             }
-            std::string tsPrefix = formatLocalTimestamp();
-            mHistory.syncFromGuiMessages(incoming, nowSec, cfg, tsPrefix);
+            std::string     tsPrefix = formatLocalTimestamp();
+            HeadKeyResolver headResolver;
+            if (cfg.chatHeads) {
+                headResolver = [](GuiMessageSnapshot const& s) {
+                    return ChatHeadsBridge::instance().resolve(s.messageType, s.username, s.authorXuid, s.fullText);
+                };
+            }
+            mHistory.syncFromGuiMessages(incoming, nowSec, cfg, tsPrefix, headResolver);
         };
 
         // Fast-check enabled/sync/closed-visibility before touching fonts or layout.
@@ -935,7 +944,12 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
             std::string_view querySv = (isChatTop && mSearchMode) ? std::string_view(mSearchQuery) : std::string_view{};
             // Authentic Java Edition keeps chat history firmly anchored at cfgCopy.bottomOffset (40.0);
             // command suggestions layer in front via AfterUIRenderEvent without pushing chat upward.
-            view = mHistory.buildView(sw, sh, isChatTop, nowSec, cfgCopy, measure, -1.0f, fontRev, querySv);
+            float headIndent = 0.0f;
+            if (cfgCopy.chatHeads && ChatHeadsBridge::instance().available()) {
+                auto& heads = ChatHeadsBridge::instance();
+                headIndent  = std::round((heads.headSize() + heads.headGap()) * cfgCopy.fontScale);
+            }
+            view = mHistory.buildView(sw, sh, isChatTop, nowSec, cfgCopy, measure, -1.0f, fontRev, querySv, headIndent);
             if (isChatTop) {
                 mLastView    = view;
                 mLastScreenW = sw;
@@ -1623,6 +1637,11 @@ std::string JavaChatMod::describeStatus() {
         << " | compact=" << (mConfig.compactDuplicates ? "on" : "off")
         << " | timestamps=" << (mConfig.showTimestamps ? "on" : "off")
         << " | clearOnSwitch=" << (mConfig.clearHistoryOnWorldSwitch ? "on" : "off")
+        << " | heads=" << (mConfig.chatHeads ? "on" : "off") << " ("
+        << (ChatHeadsBridge::instance().available()
+                ? "ChatHeads active"
+                : (ChatHeadsBridge::instance().installed() ? "ChatHeads disabled" : "ChatHeads not installed"))
+        << ")"
         << " | uiPack=" << PackPinner::instance().statusSummary()
         << " | hooks=" << ChatBehaviorHooks::instance().statusSummary();
     return oss.str();
@@ -1647,6 +1666,7 @@ std::string JavaChatMod::describeHelp() const {
            "  /jchat animations <t|f>       - Enable/disable chat open/close animations\n"
            "  /jchat keephud <true|false>   - Keep HUD & other mods' HUD visible in chat\n"
            "  /jchat clearonswitch <t|f>    - Clear history on world/server switch\n"
+           "  /jchat heads <true|false>     - Player heads next to messages (needs ChatHeads mod)\n"
            "  /jchat shadow|compact|timestamps|clickcopy|clickurl <true|false>";
 }
 
@@ -1874,6 +1894,12 @@ void JavaChatMod::setKeepHudVisibleInChat(bool keep) {
 void JavaChatMod::setClearHistoryOnWorldSwitch(bool enabled) {
     std::lock_guard lock(mMutex);
     mConfig.clearHistoryOnWorldSwitch = enabled;
+    saveConfigLocked();
+}
+
+void JavaChatMod::setChatHeads(bool enabled) {
+    std::lock_guard lock(mMutex);
+    mConfig.chatHeads = enabled;
     saveConfigLocked();
 }
 

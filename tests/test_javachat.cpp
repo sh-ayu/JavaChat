@@ -1185,6 +1185,83 @@ void testSearchFilterAndHighlight() {
 
 } // namespace
 
+void testChatHeadsIndentAndResolver() {
+    using namespace javachat;
+    ChatConfig cfg;
+    cfg.width             = 120.0f;
+    cfg.openHeight        = 200.0f;
+    cfg.compactDuplicates = true;
+    TextMeasureFn mono    = [](std::string_view sv) -> float { return 6.0f * float(stripFormatting(sv).size()); };
+
+    // Resolver is consulted once per newly ingested message, with sender metadata.
+    ChatHistory                     h;
+    int                             resolverCalls = 0;
+    std::vector<GuiMessageSnapshot> snaps(2);
+    snaps[0].fullText    = "<Steve> aaaa bbbb"; // 102px: fits 108px, wraps at 98px
+    snaps[0].messageType = 1;
+    snaps[0].username    = "Steve";
+    snaps[1].fullText    = "Server notice";
+    snaps[1].messageType = 4;
+    HeadKeyResolver resolver = [&](GuiMessageSnapshot const& s) {
+        ++resolverCalls;
+        return s.username == "Steve" ? std::string("steve") : std::string{};
+    };
+    CHECK(h.syncFromGuiMessages(snaps, 1.0, cfg, {}, resolver) == 2);
+    CHECK(resolverCalls == 2);
+    CHECK(h.syncFromGuiMessages(snaps, 1.5, cfg, {}, resolver) == 0);
+    CHECK(resolverCalls == 2);
+    CHECK(h.entries()[0].headKey == "steve");
+    CHECK(h.entries()[1].headKey.empty());
+
+    // Without heads: no indent, no head key on lines.
+    auto plain = h.buildView(640.0f, 360.0f, true, 2.0, cfg, mono);
+    CHECK(!plain.lines.empty());
+    for (auto const& l : plain.lines) {
+        CHECK(l.textIndent == 0.0f);
+        CHECK(l.headKey.empty());
+    }
+    size_t const plainLines = plain.lines.size();
+
+    // With heads: only the attributed entry is indented, head key only on its first line,
+    // and the narrower width makes it wrap into more lines.
+    auto headed = h.buildView(640.0f, 360.0f, true, 2.0, cfg, mono, -1.0f, 0, {}, 10.0f);
+    CHECK(headed.lines.size() > plainLines);
+    int headLines = 0;
+    for (auto const& l : headed.lines) {
+        bool const steveLine = (l.entryId == h.entries()[0].id);
+        CHECK(l.textIndent == (steveLine ? 10.0f : 0.0f));
+        if (!l.headKey.empty()) {
+            ++headLines;
+            CHECK(l.isFirstLine && steveLine);
+        }
+    }
+    CHECK(headLines == 1);
+
+    // Closed HUD view carries the same metadata.
+    auto closed = h.buildView(640.0f, 360.0f, false, 2.0, cfg, mono, -1.0f, 0, {}, 10.0f);
+    bool sawHead = false;
+    for (auto const& l : closed.lines) sawHead |= !l.headKey.empty();
+    CHECK(sawHead);
+
+    // Duplicate compaction never merges lines from different senders.
+    ChatHistory d;
+    d.pushMessage("gg", 1.0, cfg, 1, {}, "steve");
+    d.pushMessage("gg", 1.1, cfg, 1, {}, "alex");
+    d.pushMessage("gg", 1.2, cfg, 1, {}, "alex");
+    CHECK(d.size() == 2);
+    CHECK(d.entries().back().repeatCount == 2);
+
+    // Config round-trip.
+    ChatConfig off;
+    off.chatHeads = false;
+    ChatConfig parsed;
+    CHECK(parseConfigJson(serializeConfigJson(off), parsed));
+    CHECK(parsed.chatHeads == false);
+    ChatConfig defaults;
+    CHECK(parseConfigJson("{}", defaults));
+    CHECK(defaults.chatHeads == true);
+}
+
 int main() {
     testConfigParseAndRoundTrip();
     testConfigFileSaveLoadAndCorruptBackup();
@@ -1203,6 +1280,7 @@ int main() {
     testFastTypingSuggestionSyncAndKnownCommands();
     testWordDeletionUtf8();
     testSearchFilterAndHighlight();
+    testChatHeadsIndentAndResolver();
 
     std::cout << "==== " << gPassed << " passed, " << gFailed << " failed ====\n";
     return gFailed == 0 ? 0 : 1;

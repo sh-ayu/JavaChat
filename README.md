@@ -60,6 +60,9 @@ JavaChat splits the work cleanly:
   - **Click actions** (without unfocusing the input bar):
     - Left-click a line containing `http://` or `https://` to open it in your browser.
     - Left-click (non-URL) or right-click any line to copy its clean text (`§` codes stripped) to the clipboard.
+- **Player heads (Chat Heads integration)**:
+  - With the companion **[ChatHeads](https://github.com/sh-ayu/ChatHeads)** mod installed, each player's 8×8 face (plus hat layer) is drawn to the left of their messages in both closed HUD chat and open chat, Java *Chat Heads* style. Senders are detected from the message author, the sender name, or server-formatted text such as `[Admin] Steve: hi`. Faces are kept after a player leaves, and wrapped lines indent cleanly (`chatHeads`, `/jchat heads`).
+  - There is no hard dependency: JavaChat detects `ChatHeads.dll` at runtime and works exactly as before without it.
 - **Server UI override**:
   - Pins the bundled `JavaChatUI` pack to stack index 0 via `ResourcePackManager::composeFullStack` (`HookPriority::High`), overriding custom server chat UIs while preserving server packs below it (`overrideServerChatUi`).
 
@@ -126,6 +129,7 @@ All settings can be adjusted live in-game and are saved automatically to `config
 | `/jchat clickcopy <true\|false>` | Toggle click-to-copy |
 | `/jchat clickurl <true\|false>` | Toggle click-to-open `http(s)` URLs |
 | `/jchat clearonswitch <true\|false>` | Toggle clearing chat history when switching worlds/servers |
+| `/jchat heads <true\|false>` | Toggle player heads next to messages (requires the [ChatHeads](https://github.com/sh-ayu/ChatHeads) mod) |
 
 ---
 
@@ -160,6 +164,7 @@ Supports standard JSON as well as `//` line comments, `/* ... */` block comments
 | `keepHudVisibleInChat` | `true` | Keep `hud_screen` & other mods' HUD overlays visible while chat is open |
 | `font` | `"default"` | Built-in font (`default`/`smooth`/`unicode`/`MinecraftTen`/`rune`/`SmoothSmall`) or `.ttf` path/filename |
 | `clearHistoryOnWorldSwitch` | `true` | Clear history when joining/leaving a world or server |
+| `chatHeads` | `true` | Draw player heads when the [ChatHeads](https://github.com/sh-ayu/ChatHeads) mod is installed |
 | `verboseLog` | `false` | Emit extra diagnostic log lines |
 
 ---

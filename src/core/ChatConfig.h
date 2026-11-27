@@ -36,6 +36,7 @@ struct ChatConfig {
     bool        keepHudVisibleInChat      = true;
     std::string font                      = "default";
     bool        clearHistoryOnWorldSwitch = true;
+    bool        chatHeads                 = true; // draw player heads when the ChatHeads mod is installed
     bool        verboseLog                = false;
 };
 

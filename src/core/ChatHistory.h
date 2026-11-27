@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -28,7 +29,12 @@ struct GuiMessageSnapshot {
     std::string fullText;
     float       duration    = 0.0f;
     int         messageType = 0;
+    std::string username;   // GuiMessage::mUsername (sender, may be empty)
+    std::string authorXuid; // GuiMessage::mAuthorXuid (may be empty)
 };
+
+// Maps a newly ingested message to a ChatHeads head key ("" = no head). Only called for new entries.
+using HeadKeyResolver = std::function<std::string(GuiMessageSnapshot const&)>;
 
 struct CachedWrappedLine {
     std::string                text;
@@ -44,6 +50,7 @@ struct ChatEntry {
     double                     receivedAtSec = 0.0;
     int                        repeatCount   = 1;
     int                        messageType   = 0;
+    std::string                headKey;        // ChatHeads sender key ("" = no head)
 
     // Per-entry wrapped line cache (invalidated when layout/display/font parameters change).
     mutable std::vector<CachedWrappedLine> cachedWrappedLines;
@@ -53,6 +60,7 @@ struct ChatEntry {
     mutable uint32_t                       cachedFontRevision  = 0;
     mutable bool                           cachedTimestamps    = false;
     mutable bool                           cachedCompact       = false;
+    mutable float                          cachedHeadIndent    = -1.0f;
 };
 
 struct RenderedChatLine {
@@ -65,6 +73,8 @@ struct RenderedChatLine {
     float                      textAlpha   = 0.0f;
     bool                       hasUrl      = false;
     bool                       isFirstLine = true;
+    float                      textIndent  = 0.0f; // horizontal space reserved for a chat head
+    std::string                headKey;            // set on the first line of entries with a head
 };
 
 struct ChatViewLayout {
@@ -103,7 +113,8 @@ public:
         std::span<GuiMessageSnapshot const> current,
         double                              nowSec,
         ChatConfig const&                   cfg,
-        std::string_view                    timestampPrefix = {}
+        std::string_view                    timestampPrefix = {},
+        HeadKeyResolver const&              headResolver    = {}
     );
 
     // Push a single message directly (also used by tests / local notices).
@@ -112,7 +123,8 @@ public:
         double            nowSec,
         ChatConfig const& cfg,
         int               messageType     = 1,
-        std::string_view  timestampPrefix = {}
+        std::string_view  timestampPrefix = {},
+        std::string_view  headKey         = {}
     );
 
     // Clear all stored messages and reset scroll.
@@ -136,6 +148,7 @@ public:
     ChatEntry const*        findById(uint64_t id) const noexcept;
 
     // Compute visible Java-style chat layout for the current frame.
+    // `headIndent`: GUI px reserved left of the text for entries that carry a head key (0 = heads off).
     // `bottomOffsetOverride`: when > 0, acts as a minimum bottom offset floor
     // `max(cfg.bottomOffset, bottomOffsetOverride)` (e.g. to sit cleanly above
     // a tall command autocomplete popup without ever pushing chat lower than cfg.bottomOffset).
@@ -148,7 +161,8 @@ public:
         TextMeasureFn const& measure,
         float                bottomOffsetOverride = -1.0f,
         uint32_t             fontRevision         = 0,
-        std::string_view     searchQuery          = {}
+        std::string_view     searchQuery          = {},
+        float                headIndent           = 0.0f
     );
 
     // Return the index in `view.lines` containing (mx, my), or std::nullopt.

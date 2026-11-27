@@ -487,6 +487,7 @@ bool parseConfigJson(std::string_view jsonText, ChatConfig& outConfig, std::stri
             else if (key == "autoCloseOnSend") readBool(cfg.autoCloseOnSend);
             else if (key == "disableChatAnimations") readBool(cfg.disableChatAnimations);
             else if (key == "keepHudVisibleInChat") readBool(cfg.keepHudVisibleInChat);
+            else if (key == "chatHeads") readBool(cfg.chatHeads);
             else if (key == "font") readString(cfg.font);
             else if (key == "clearHistoryOnWorldSwitch") readBool(cfg.clearHistoryOnWorldSwitch);
             else if (key == "verboseLog") readBool(cfg.verboseLog);
@@ -568,6 +569,7 @@ std::string serializeConfigJson(ChatConfig const& rawCfg) {
         << "  \"autoCloseOnSend\": " << b(cfg.autoCloseOnSend) << ",\n"
         << "  \"disableChatAnimations\": " << b(cfg.disableChatAnimations) << ",\n"
         << "  \"keepHudVisibleInChat\": " << b(cfg.keepHudVisibleInChat) << ",\n"
+        << "  \"chatHeads\": " << b(cfg.chatHeads) << ",\n"
         << "  \"font\": \"" << escapeJsonString(cfg.font) << "\",\n"
         << "  \"clearHistoryOnWorldSwitch\": " << b(cfg.clearHistoryOnWorldSwitch) << ",\n"
         << "  \"verboseLog\": " << b(cfg.verboseLog) << "\n"
