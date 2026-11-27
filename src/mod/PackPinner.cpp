@@ -84,19 +84,18 @@ PackPinner& PackPinner::instance() noexcept {
     return inst;
 }
 
-bool PackPinner::install(ll::io::Logger* logger, std::string uiPackUuid, PackPinMode mode, bool verbose) noexcept {
+bool PackPinner::install(ll::io::Logger* logger, std::string uiPackUuid, bool enabled, bool verbose) noexcept {
     {
         std::lock_guard lock(mConfigMutex);
         mLogger          = logger;
         mTargetUuidLower = toLowerAscii(std::move(uiPackUuid));
     }
     mShutdown.store(false, std::memory_order_release);
-    mMode.store(static_cast<int>(mode), std::memory_order_release);
+    mEnabled.store(enabled, std::memory_order_relaxed);
     mVerbose.store(verbose, std::memory_order_relaxed);
     mFailedLatch.store(false, std::memory_order_relaxed);
     mComposeObserved.store(false, std::memory_order_relaxed);
     mPinnedLast.store(false, std::memory_order_relaxed);
-    mStrippedLast.store(false, std::memory_order_relaxed);
     mPackFoundLast.store(false, std::memory_order_relaxed);
 
     if (mHookInstalled.load(std::memory_order_relaxed)) return true;
@@ -122,8 +121,8 @@ void PackPinner::uninstall() noexcept {
     mLogger = nullptr;
 }
 
-void PackPinner::setMode(PackPinMode mode) noexcept {
-    mMode.store(static_cast<int>(mode), std::memory_order_release);
+void PackPinner::setEnabled(bool enabled) noexcept {
+    mEnabled.store(enabled, std::memory_order_relaxed);
 }
 
 void PackPinner::setVerbose(bool verbose) noexcept {
@@ -133,12 +132,8 @@ void PackPinner::setVerbose(bool verbose) noexcept {
 std::string PackPinner::statusSummary() const {
     if (!mHookInstalled.load(std::memory_order_acquire)) return "hook=off";
     if (mFailedLatch.load(std::memory_order_relaxed)) return "hook=latched_failed";
-    auto const mode = static_cast<PackPinMode>(mMode.load(std::memory_order_acquire));
-    if (mode == PackPinMode::Passthrough) return "hook=passthrough";
+    if (!mEnabled.load(std::memory_order_relaxed)) return "hook=bypassed";
     if (!mComposeObserved.load(std::memory_order_acquire)) return "pending";
-    if (mode == PackPinMode::Strip) {
-        return mStrippedLast.load(std::memory_order_relaxed) ? "stripped=true" : "stripped=false";
-    }
     if (mPinnedLast.load(std::memory_order_relaxed)) return "pinned=true";
     if (!mPackFoundLast.load(std::memory_order_relaxed)) return "pinned=false (UI pack not yet in repo)";
     return "pinned=false";
@@ -147,8 +142,7 @@ std::string PackPinner::statusSummary() const {
 void PackPinner::onAfterCompose(void const* mgrVoid, void* outputStackVoid) noexcept {
     try {
         if (mShutdown.load(std::memory_order_acquire)) return;
-        auto const mode = static_cast<PackPinMode>(mMode.load(std::memory_order_acquire));
-        if (mode == PackPinMode::Passthrough || mFailedLatch.load(std::memory_order_relaxed)) return;
+        if (!mEnabled.load(std::memory_order_relaxed) || mFailedLatch.load(std::memory_order_relaxed)) return;
         if (!outputStackVoid) return;
 
         std::string     targetUuidLower;
@@ -172,82 +166,56 @@ void PackPinner::onAfterCompose(void const* mgrVoid, void* outputStackVoid) noex
         auto& repo   = client.getResourcePackRepository();
         auto& vec    = output.mStack.get();
 
-        bool const stripOnly = (mode == PackPinMode::Strip);
-        if (stripOnly) {
-            bool foundInStack = false;
-            for (PackInstance const& pi : vec) {
-                std::string uuid;
-                if (readEntryUuid(pi, uuid) && uuid == targetUuidLower) {
-                    foundInStack = true;
-                    break;
-                }
-            }
-            if (!foundInStack) {
-                mPackFoundLast.store(false, std::memory_order_relaxed);
-                mPinnedLast.store(false, std::memory_order_relaxed);
-                mStrippedLast.store(true, std::memory_order_relaxed);
+        // Already pinned at index 0? Nothing to do.
+        if (!vec.empty()) {
+            std::string firstUuid;
+            if (readEntryUuid(vec.front(), firstUuid) && firstUuid == targetUuidLower) {
+                mPackFoundLast.store(true, std::memory_order_relaxed);
+                mPinnedLast.store(true, std::memory_order_relaxed);
                 return;
-            }
-            mPackFoundLast.store(true, std::memory_order_relaxed);
-        } else {
-            // PinTop: already pinned at index 0? Nothing to do.
-            if (!vec.empty()) {
-                std::string firstUuid;
-                if (readEntryUuid(vec.front(), firstUuid) && firstUuid == targetUuidLower) {
-                    mPackFoundLast.store(true, std::memory_order_relaxed);
-                    mPinnedLast.store(true, std::memory_order_relaxed);
-                    mStrippedLast.store(false, std::memory_order_relaxed);
-                    return;
-                }
             }
         }
 
-        ::PackManifest const*           manifest = nullptr;
-        std::shared_ptr<::ResourcePack> targetSp;
-        if (!stripOnly) {
-            auto parsedUuid = ::mce::UUID::tryFromString(targetUuidLower);
-            if (!parsedUuid.has_value()) return;
+        // Resolve JavaChatUI from the repository.
+        auto parsedUuid = ::mce::UUID::tryFromString(targetUuidLower);
+        if (!parsedUuid.has_value()) return;
 
-            auto            found  = repo.getResourcePacksByUUID(parsedUuid.value());
-            ::ResourcePack* chosen = nullptr;
-            for (auto* rp : found) {
-                if (!rp) continue;
-                auto const* impl = rp->mImpl.get().get();
-                if (!impl || !impl->mPack.get()) continue;
-                auto const* mp = impl->mPack.get()->mManifest.get();
-                if (mp && mp->mPackType == ::PackType::Resources) {
-                    chosen = rp;
-                    break;
-                }
+        auto            found  = repo.getResourcePacksByUUID(parsedUuid.value());
+        ::ResourcePack* chosen = nullptr;
+        for (auto* rp : found) {
+            if (!rp) continue;
+            auto const* impl = rp->mImpl.get().get();
+            if (!impl || !impl->mPack.get()) continue;
+            auto const* mp = impl->mPack.get()->mManifest.get();
+            if (mp && mp->mPackType == ::PackType::Resources) {
+                chosen = rp;
+                break;
             }
-            if (!chosen && !found.empty()) chosen = found.front();
-            if (!chosen) {
-                mPackFoundLast.store(false, std::memory_order_relaxed);
-                mPinnedLast.store(false, std::memory_order_relaxed);
-                mStrippedLast.store(false, std::memory_order_relaxed);
-                return;
-            }
-            auto const* chosenImpl = chosen->mImpl.get().get();
-            if (!chosenImpl || !chosenImpl->mPack.get()) {
-                mPackFoundLast.store(false, std::memory_order_relaxed);
-                mPinnedLast.store(false, std::memory_order_relaxed);
-                mStrippedLast.store(false, std::memory_order_relaxed);
-                return;
-            }
-            manifest = chosenImpl->mPack.get()->mManifest.get();
-            if (!manifest) {
-                mPackFoundLast.store(false, std::memory_order_relaxed);
-                mPinnedLast.store(false, std::memory_order_relaxed);
-                mStrippedLast.store(false, std::memory_order_relaxed);
-                return;
-            }
-            mPackFoundLast.store(true, std::memory_order_relaxed);
-
-            targetSp = repo.getResourcePackForPackId(manifest->mIdentity.get());
-            if (!targetSp) return;
         }
+        if (!chosen && !found.empty()) chosen = found.front();
+        if (!chosen) {
+            mPackFoundLast.store(false, std::memory_order_relaxed);
+            mPinnedLast.store(false, std::memory_order_relaxed);
+            return;
+        }
+        auto const* chosenImpl = chosen->mImpl.get().get();
+        if (!chosenImpl || !chosenImpl->mPack.get()) {
+            mPackFoundLast.store(false, std::memory_order_relaxed);
+            mPinnedLast.store(false, std::memory_order_relaxed);
+            return;
+        }
+        auto const* manifest = chosenImpl->mPack.get()->mManifest.get();
+        if (!manifest) {
+            mPackFoundLast.store(false, std::memory_order_relaxed);
+            mPinnedLast.store(false, std::memory_order_relaxed);
+            return;
+        }
+        mPackFoundLast.store(true, std::memory_order_relaxed);
 
-        // Snapshot existing non-target entries without copying/moving PackInstance (PackReport copy ops are MCNAPI).
+        auto targetSp = repo.getResourcePackForPackId(manifest->mIdentity.get());
+        if (!targetSp) return;
+
+        // Snapshot existing entries without copying/moving PackInstance (PackReport copy ops are MCNAPI).
         struct KeptEntry {
             std::shared_ptr<::ResourcePack> pack;
             int                             subpackIndex = -1;
@@ -264,7 +232,7 @@ void PackPinner::onAfterCompose(void const* mgrVoid, void* outputStackVoid) noex
             std::string uuid;
             bool        known = readEntryUuid(pi, uuid);
             if (known && uuid == targetUuidLower) {
-                continue; // Either placed at index 0 (PinTop) or stripped cleanly (Strip).
+                continue; // Will be placed at index 0.
             }
             KeptEntry k;
             k.pack         = pi.mPack.get();
@@ -290,11 +258,8 @@ void PackPinner::onAfterCompose(void const* mgrVoid, void* outputStackVoid) noex
             ::Bedrock::NonOwnerPointer<::IResourcePackRepository const>    nnp(repo);
             ::Bedrock::NotNullNonOwnerPtr<::IResourcePackRepository const> nn(nnp);
 
-            if (!stripOnly) {
-                ::PackSettings* targetSettings =
-                    repo.getPackSettingsFactory().getPackSettings(*manifest, std::nullopt);
-                output.add(::PackInstance(targetSp, -1, false, targetSettings), nn, false);
-            }
+            ::PackSettings* targetSettings = repo.getPackSettingsFactory().getPackSettings(*manifest, std::nullopt);
+            output.add(::PackInstance(targetSp, -1, false, targetSettings), nn, false);
 
             for (auto& k : kept) {
                 if (!k.pack) continue;
@@ -326,23 +291,11 @@ void PackPinner::onAfterCompose(void const* mgrVoid, void* outputStackVoid) noex
                 }
             }
 
-            if (stripOnly) {
-                bool stillPresent = false;
-                for (PackInstance const& pi : vec) {
-                    std::string u;
-                    if (readEntryUuid(pi, u) && u == targetUuidLower) {
-                        stillPresent = true;
-                        break;
-                    }
-                }
-                rebuiltOk = (restored == kept.size()) && !stillPresent;
-            } else {
-                if (!vec.empty()) {
-                    std::string topUuid;
-                    pinnedNow = readEntryUuid(vec.front(), topUuid) && topUuid == targetUuidLower;
-                }
-                rebuiltOk = (restored == kept.size()) && pinnedNow;
+            if (!vec.empty()) {
+                std::string topUuid;
+                pinnedNow = readEntryUuid(vec.front(), topUuid) && topUuid == targetUuidLower;
             }
+            rebuiltOk = (restored == kept.size()) && pinnedNow;
         } catch (...) {
             rebuiltOk = false;
         }
@@ -350,12 +303,10 @@ void PackPinner::onAfterCompose(void const* mgrVoid, void* outputStackVoid) noex
         if (!rebuiltOk) {
             vec.swap(backup);
             mPinnedLast.store(false, std::memory_order_relaxed);
-            mStrippedLast.store(false, std::memory_order_relaxed);
             mFailedLatch.store(true, std::memory_order_relaxed);
             if (!mShutdown.load(std::memory_order_acquire) && logger) {
                 logger->error(
-                    "JavaChat: UI pack {} failed (restored={}/{}, pinned={}); rolled back original stack",
-                    stripOnly ? "strip" : "pin",
+                    "JavaChat: UI pack pin failed (restored={}/{}, pinned={}); rolled back original stack and disabled pin",
                     restored,
                     kept.size(),
                     pinnedNow
@@ -364,15 +315,9 @@ void PackPinner::onAfterCompose(void const* mgrVoid, void* outputStackVoid) noex
             return;
         }
 
-        mPinnedLast.store(!stripOnly, std::memory_order_relaxed);
-        mStrippedLast.store(stripOnly, std::memory_order_relaxed);
-        if (!mShutdown.load(std::memory_order_acquire) && (stripOnly || mVerbose.load(std::memory_order_relaxed))
-            && logger) {
-            logger->info(
-                "JavaChat: {} JavaChatUI (total entries={})",
-                stripOnly ? "stripped" : "pinned",
-                vec.size()
-            );
+        mPinnedLast.store(true, std::memory_order_relaxed);
+        if (!mShutdown.load(std::memory_order_acquire) && mVerbose.load(std::memory_order_relaxed) && logger) {
+            logger->info("JavaChat: pinned JavaChatUI at stack[0] (total entries={})", vec.size());
         }
     } catch (...) {
         mFailedLatch.store(true, std::memory_order_relaxed);

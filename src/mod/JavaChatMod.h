@@ -92,8 +92,6 @@ private:
 
     void exitSearchModeLocked(bool restoreDraft) noexcept;
     void clearInputSelectionStateLocked() noexcept;
-    void scheduleUiPackReload() noexcept;
-    void applyUiPackReloadOnClientThread() noexcept;
     void showToastLocked(std::string text, double nowSec);
     void saveConfigLocked() noexcept;
 
@@ -140,6 +138,8 @@ private:
     std::string                     mToastText;
     double                          mToastUntilSec           = 0.0;
     void const*                     mLastLevelPtr            = nullptr;
+    void const*                     mLastHudScreenView       = nullptr;
+    std::optional<bool>             mLastHudSyncedEnabled;
     ScreenView const*               mCachedDisplayTextScreen = nullptr;
     std::weak_ptr<UIControl>        mCachedDisplayTextCtrl;
 
@@ -149,7 +149,6 @@ private:
     std::atomic<bool>      mInGameHudOrChat{false};
     std::atomic<long long> mLastHudOrChatMs{0};
     std::atomic<bool>      mF3DLatched{false};
-    std::atomic<bool>      mPendingUiReload{false};
 };
 
 } // namespace javachat

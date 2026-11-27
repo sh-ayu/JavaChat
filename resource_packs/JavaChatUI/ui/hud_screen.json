@@ -6,20 +6,41 @@
     "$use_loading_bars": false
   },
 
-  // Suppress vanilla top-left HUD chat so JavaChat's C++ renderer draws it in the bottom-left.
-  // Keep chat_stack intact so player coordinates and paper doll remain unaffected.
-  "chat_panel": {
+  // Dynamically toggle vanilla top-left HUD chat visibility via #jchat_vanilla_hud_visible
+  // so /jchat toggle restores vanilla HUD chat immediately without resource-pack reload.
+  // Bind stack_panel + chat_grid_item instead of overriding chat_panel itself so other mods
+  // (e.g., playback-ui on chat_panel) do not clash with our #visible binding.
+  "chat_panel/stack_panel": {
     "visible": false,
-    "ignored": true,
-    "size": [0, 0],
-    "controls": []
+    "bindings": [
+      {
+        "binding_name": "#jchat_vanilla_hud_visible",
+        "binding_name_override": "#visible",
+        "binding_condition": "always"
+      }
+    ]
   },
 
-  // Also suppress common third-party server custom chat panels if present below us in the stack.
+  "chat_grid_item": {
+    "visible": false,
+    "bindings": [
+      {
+        "binding_name": "#jchat_vanilla_hud_visible",
+        "binding_name_override": "#visible",
+        "binding_condition": "always"
+      }
+    ]
+  },
+
+  // Apply the same dynamic visibility toggle to custom server chat panels if present below us.
   "custom_chat_panel": {
     "visible": false,
-    "ignored": true,
-    "size": [0, 0],
-    "controls": []
+    "bindings": [
+      {
+        "binding_name": "#jchat_vanilla_hud_visible",
+        "binding_name_override": "#visible",
+        "binding_condition": "always"
+      }
+    ]
   }
 }

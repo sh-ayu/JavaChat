@@ -11,7 +11,12 @@
 #include <vector>
 
 class ChatScreenController;
+class ScreenController;
 class ScreenView;
+
+namespace Json {
+class Value;
+}
 
 namespace ll::io {
 class Logger;
@@ -68,6 +73,9 @@ public:
     void uninstall() noexcept;
 
     void setEnabled(bool enabled) noexcept;
+    bool isShutdown() const noexcept { return mShutdown.load(std::memory_order_relaxed); }
+    bool isEnabled() const noexcept { return mEnabled.load(std::memory_order_relaxed); }
+    void requestCloseCurrentChatOnce() noexcept;
     void setAutoCloseOnSend(bool enabled) noexcept;
     void setDisableAnimations(bool disabled) noexcept;
     void setKeepHudVisibleInChat(bool keep) noexcept;
@@ -91,6 +99,10 @@ public:
     bool isAutoCloseHookInstalled() const noexcept { return mHandleEventHookInstalled.load(std::memory_order_relaxed); }
     bool isTextRenderHookInstalled() const noexcept { return mTextRenderHookInstalled.load(std::memory_order_relaxed); }
     bool isKeepHudHookInstalled() const noexcept { return mIgnoreAsTopHookInstalled.load(std::memory_order_relaxed); }
+    bool isCreateSceneHookInstalled() const noexcept { return mCreateSceneHookInstalled.load(std::memory_order_relaxed); }
+    bool isHudCtorHookInstalled() const noexcept { return mHudCtorHookInstalled.load(std::memory_order_relaxed); }
+    bool isHudBindingReady() const noexcept { return mHudBindingReady.load(std::memory_order_acquire); }
+    bool isChatStaticVarsHookInstalled() const noexcept { return mChatStaticVarsHookInstalled.load(std::memory_order_relaxed); }
     bool areAnimHooksInstalled() const noexcept {
         return mEntranceHookInstalled.load(std::memory_order_relaxed)
             && mExitHookInstalled.load(std::memory_order_relaxed);
@@ -98,6 +110,9 @@ public:
     std::string statusSummary() const;
 
     // Hook callbacks (public for hook trampolines).
+    void                       onHudControllerCreated(::ScreenController* controller, bool fromCtor = false) noexcept;
+    void                       onCreateUISceneBefore(std::string const& screenName, std::shared_ptr<::ScreenController> const& controller) noexcept;
+    void                       onChatAddStaticScreenVarsAfter(::ScreenController const* ctrl, ::Json::Value& globalVars) const noexcept;
     void                       onScreenEntranceBefore(void const* scenePtr, bool& doScreenTransitions) noexcept;
     void                       onScreenExitBefore(void const* scenePtr, void const* pushedScenePtr, bool& doScreenTransitions) noexcept;
     bool                       shouldTreatAsIgnoreTop(void const* scenePtr) const noexcept;
@@ -119,6 +134,7 @@ public:
 private:
     ChatBehaviorHooks() = default;
     void ensureIgnoreAsTopHook(void const* scenePtr) noexcept;
+    void ensureChatStaticVarsHook(::ScreenController const* ctrl) noexcept;
 
     ll::io::Logger*        mLogger = nullptr;
     std::atomic<bool>      mShutdown{false};
@@ -131,13 +147,26 @@ private:
     std::atomic<bool>        mExitHookInstalled{false};
     std::atomic<bool>        mHandleEventHookInstalled{false};
     std::atomic<bool>        mTextRenderHookInstalled{false};
+    std::atomic<bool>        mCreateSceneHookInstalled{false};
+    std::atomic<bool>        mHudCtorHookInstalled{false};
+    std::atomic<bool>        mHudBindingReady{false};
+    std::atomic<void const*> mLastBoundHudCtrl{nullptr};
     std::atomic<bool>        mIgnoreAsTopHookInstalled{false};
     std::atomic<bool>        mIgnoreAsTopAttempted{false};
     std::atomic<bool>        mLoggedAnchorMismatch{false};
     std::mutex               mIgnoreAsTopMutex;
     void*                    mIgnoreAsTopTarget = nullptr;
+    std::atomic<bool>        mChatStaticVarsHookInstalled{false};
+    std::atomic<bool>        mChatStaticVarsAttempted{false};
+    std::atomic<bool>        mLoggedChatStaticVarsMismatch{false};
+    std::atomic<void const*> mChatStaticVarsVtbl{nullptr};
+    std::atomic<bool>        mLoggedHudBindingReady{false};
+    std::atomic<bool>        mLoggedSceneNameDiag{false};
+    std::mutex               mChatStaticVarsMutex;
+    void*                    mChatStaticVarsTarget = nullptr;
     std::atomic<bool>        mJustExitedChat{false};
     std::atomic<bool>        mSuppressedHudExit{false};
+    std::atomic<bool>        mForceCloseOnce{false};
     std::atomic<void*>       mPendingCloseCtrl{nullptr};
     std::atomic<long long>   mPendingCloseDeadlineMs{0};
 

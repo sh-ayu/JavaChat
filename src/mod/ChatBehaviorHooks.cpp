@@ -37,6 +37,7 @@
 #include <mc/client/gui/controls/UIRenderContext.h>
 #include <mc/client/gui/screens/AbstractScene.h>
 #include <mc/client/gui/screens/ButtonScreenEventData.h>
+#include <mc/client/gui/screens/SceneFactory.h>
 #include <mc/client/gui/screens/ScreenController.h>
 #include <mc/client/gui/screens/ScreenEvent.h>
 #include <mc/client/gui/screens/ScreenEventData.h>
@@ -45,11 +46,14 @@
 #include <mc/client/gui/screens/TextEditScreenEventData.h>
 #include <mc/client/gui/screens/UIScene.h>
 #include <mc/client/gui/screens/controllers/ChatScreenController.h>
+#include <mc/client/gui/screens/controllers/HudScreenController.h>
 #include <mc/client/gui/screens/interfaces/ISceneStack.h>
 #include <mc/client/renderer/screen/MinecraftUIRenderContext.h>
 #include <mc/deps/core/math/Color.h>
+#include <mc/deps/core/string/StringHash.h>
 #include <mc/deps/input/RectangleArea.h>
 #include <mc/deps/input/enums/ButtonState.h>
+#include <mc/deps/json/Value.h>
 
 namespace javachat {
 namespace {
@@ -177,6 +181,44 @@ using IgnoreAsTopFn = bool (*)(::UIScene const*);
 std::atomic<IgnoreAsTopFn> gOrigIgnoreAsTop{nullptr};
 void*                      gOrigIgnoreAsTopRaw = nullptr;
 
+using AddStaticScreenVarsFn = void (*)(::ScreenController*, ::Json::Value&);
+std::atomic<AddStaticScreenVarsFn> gOrigChatAddStaticVars{nullptr};
+void*                              gOrigChatAddStaticVarsRaw = nullptr;
+
+bool isHudSceneName(std::string_view name) noexcept {
+    return name == "hud_screen" || name == "hud.hud_screen" || name.ends_with(".hud_screen");
+}
+
+bool isChatSceneName(std::string_view name) noexcept {
+    return name == "chat_screen" || name == "chat.chat_screen" || name.ends_with(".chat_screen");
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    HudScreenControllerCtorHook,
+    ::ll::memory::HookPriority::Normal,
+    HudScreenController,
+    &HudScreenController::$ctor,
+    void*,
+    ::std::shared_ptr<::ClientInstanceScreenModel> model
+) {
+    void* res = origin(std::move(model));
+    ChatBehaviorHooks::instance().onHudControllerCreated(this, true);
+    return res;
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    CreateUISceneHook,
+    ::ll::memory::HookPriority::Normal,
+    SceneFactory,
+    &SceneFactory::createUIScene,
+    ::std::shared_ptr<::UIScene>,
+    ::std::string const&                   screenName,
+    ::std::shared_ptr<::ScreenController>  controller
+) {
+    ChatBehaviorHooks::instance().onCreateUISceneBefore(screenName, controller);
+    return origin(screenName, std::move(controller));
+}
+
 bool isReadableRange(void const* ptr, size_t len) noexcept {
     if (!ptr || len == 0) return false;
     auto const addr = reinterpret_cast<uintptr_t>(ptr);
@@ -265,6 +307,26 @@ bool matchesAnyAnchor(void const* actual, std::array<void const*, 3> const& cand
     return false;
 }
 
+template <typename Method>
+std::optional<uint> getChatControllerVtableIndex(Method method) noexcept {
+    if (auto index = ::ll::memory::getVtableIndex(method)) return index;
+
+    // LeviLamina 26.60.8 recognizes the 32-bit displacement. Clang also emits
+    // mov rax, [rcx]; mov rax, [rax + disp8]; jmp rax for lower slots.
+    auto const* code = static_cast<uint8_t const*>(followSimpleJmpThunks(::ll::memory::toFuncPtr(method)));
+    constexpr uint8_t prefix[]{0x48, 0x8B, 0x01, 0x48, 0x8B, 0x40};
+    constexpr uint8_t jump[]{0x48, 0xFF, 0xE0};
+    constexpr size_t offset = sizeof(prefix);
+    if (!isReadableRange(code, offset + 1 + sizeof(jump))
+        || std::memcmp(code, prefix, sizeof(prefix)) != 0
+        || std::memcmp(code + offset + 1, jump, sizeof(jump)) != 0) {
+        return std::nullopt;
+    }
+    uint8_t const displacement = code[offset];
+    if (displacement > 0x7F || displacement % sizeof(void*) != 0) return std::nullopt;
+    return static_cast<uint>(displacement / sizeof(void*));
+}
+
 bool ignoreAsTopDetour(::UIScene const* self) noexcept {
     if (ChatBehaviorHooks::instance().shouldTreatAsIgnoreTop(self)) {
         return true;
@@ -275,6 +337,18 @@ bool ignoreAsTopDetour(::UIScene const* self) noexcept {
         orig      = reinterpret_cast<IgnoreAsTopFn>(raw);
     }
     return orig ? orig(self) : false;
+}
+
+void chatAddStaticScreenVarsDetour(::ScreenController* self, ::Json::Value& globalVars) noexcept {
+    auto orig = gOrigChatAddStaticVars.load(std::memory_order_acquire);
+    if (!orig) {
+        void* raw = std::atomic_ref<void*>(gOrigChatAddStaticVarsRaw).load(std::memory_order_acquire);
+        orig      = reinterpret_cast<AddStaticScreenVarsFn>(raw);
+    }
+    if (orig) {
+        orig(self, globalVars);
+    }
+    ChatBehaviorHooks::instance().onChatAddStaticScreenVarsAfter(self, globalVars);
 }
 
 } // namespace
@@ -301,8 +375,20 @@ bool ChatBehaviorHooks::install(
         mIgnoreAsTopAttempted.store(false, std::memory_order_relaxed);
     }
     mLoggedAnchorMismatch.store(false, std::memory_order_relaxed);
+    if (!mChatStaticVarsHookInstalled.load(std::memory_order_relaxed)) {
+        mChatStaticVarsAttempted.store(false, std::memory_order_relaxed);
+        mChatStaticVarsVtbl.store(nullptr, std::memory_order_release);
+    }
+    mLoggedChatStaticVarsMismatch.store(false, std::memory_order_relaxed);
+    if (!mHudCtorHookInstalled.load(std::memory_order_relaxed)) {
+        mHudBindingReady.store(false, std::memory_order_release);
+        mLastBoundHudCtrl.store(nullptr, std::memory_order_release);
+    }
+    mLoggedHudBindingReady.store(false, std::memory_order_relaxed);
+    mLoggedSceneNameDiag.store(false, std::memory_order_relaxed);
     mJustExitedChat.store(false, std::memory_order_relaxed);
     mSuppressedHudExit.store(false, std::memory_order_relaxed);
+    mForceCloseOnce.store(false, std::memory_order_relaxed);
     mSearchMode.store(false, std::memory_order_release);
     clearPendingAutoClose();
     clearChatInputState();
@@ -339,8 +425,26 @@ bool ChatBehaviorHooks::install(
             mTextRenderHookInstalled.store(false, std::memory_order_relaxed);
         }
     }
+    if (!mCreateSceneHookInstalled.load(std::memory_order_relaxed)) {
+        try {
+            bool ok = (CreateUISceneHook::hook() == 0);
+            mCreateSceneHookInstalled.store(ok, std::memory_order_relaxed);
+        } catch (...) {
+            mCreateSceneHookInstalled.store(false, std::memory_order_relaxed);
+        }
+    }
+    if (!mHudCtorHookInstalled.load(std::memory_order_relaxed)) {
+        try {
+            bool ok = (HudScreenControllerCtorHook::hook() == 0);
+            mHudCtorHookInstalled.store(ok, std::memory_order_relaxed);
+        } catch (...) {
+            mHudCtorHookInstalled.store(false, std::memory_order_relaxed);
+        }
+    }
 
-    if (mLogger && (!areAnimHooksInstalled() || !isAutoCloseHookInstalled() || !isTextRenderHookInstalled())) {
+    if (mLogger
+        && (!areAnimHooksInstalled() || !isAutoCloseHookInstalled() || !isTextRenderHookInstalled()
+            || !isCreateSceneHookInstalled() || !isHudCtorHookInstalled())) {
         mLogger->warn("JavaChat: partial behavior hooks ({})", statusSummary());
     }
     return areAnimHooksInstalled() && isAutoCloseHookInstalled();
@@ -350,6 +454,7 @@ void ChatBehaviorHooks::uninstall() noexcept {
     mShutdown.store(true, std::memory_order_relaxed);
     mJustExitedChat.store(false, std::memory_order_relaxed);
     mSuppressedHudExit.store(false, std::memory_order_relaxed);
+    mForceCloseOnce.store(false, std::memory_order_relaxed);
     mSearchMode.store(false, std::memory_order_release);
     clearPendingAutoClose();
     clearChatInputState();
@@ -357,6 +462,40 @@ void ChatBehaviorHooks::uninstall() noexcept {
     setChatTextEditAfterHandler({});
     setChatSearchExitHandler({});
 
+    if (mHudCtorHookInstalled.exchange(false, std::memory_order_relaxed)) {
+        try {
+            HudScreenControllerCtorHook::unhook();
+        } catch (...) {
+        }
+    }
+    mHudBindingReady.store(false, std::memory_order_release);
+    mLastBoundHudCtrl.store(nullptr, std::memory_order_release);
+    mLoggedHudBindingReady.store(false, std::memory_order_relaxed);
+    mLoggedSceneNameDiag.store(false, std::memory_order_relaxed);
+    if (mCreateSceneHookInstalled.exchange(false, std::memory_order_relaxed)) {
+        try {
+            CreateUISceneHook::unhook();
+        } catch (...) {
+        }
+    }
+    {
+        std::lock_guard lock(mChatStaticVarsMutex);
+        if (mChatStaticVarsHookInstalled.exchange(false, std::memory_order_relaxed) && mChatStaticVarsTarget) {
+            try {
+                ::ll::memory::unhook(
+                    mChatStaticVarsTarget,
+                    reinterpret_cast<::ll::memory::FuncPtr>(&chatAddStaticScreenVarsDetour)
+                );
+            } catch (...) {
+            }
+        }
+        mChatStaticVarsTarget = nullptr;
+        mChatStaticVarsVtbl.store(nullptr, std::memory_order_release);
+        gOrigChatAddStaticVars.store(nullptr, std::memory_order_release);
+        std::atomic_ref<void*>(gOrigChatAddStaticVarsRaw).store(nullptr, std::memory_order_release);
+        mChatStaticVarsAttempted.store(false, std::memory_order_relaxed);
+        mLoggedChatStaticVarsMismatch.store(false, std::memory_order_relaxed);
+    }
     if (mTextRenderHookInstalled.exchange(false, std::memory_order_relaxed)) {
         try {
             ChatTextRenderHook::unhook();
@@ -408,6 +547,198 @@ void ChatBehaviorHooks::setEnabled(bool enabled) noexcept {
         mSearchMode.store(false, std::memory_order_release);
         clearPendingAutoClose();
         clearChatInputState();
+    }
+}
+
+void ChatBehaviorHooks::requestCloseCurrentChatOnce() noexcept {
+    mForceCloseOnce.store(true, std::memory_order_release);
+}
+
+void ChatBehaviorHooks::onHudControllerCreated(::ScreenController* controller, bool fromCtor) noexcept {
+    try {
+        if (mShutdown.load(std::memory_order_relaxed) || !controller) return;
+        if (!fromCtor) {
+            if (mLastBoundHudCtrl.exchange(controller, std::memory_order_acq_rel) == controller) {
+                return;
+            }
+        } else {
+            mLastBoundHudCtrl.store(controller, std::memory_order_release);
+        }
+        controller->bindBool(
+            ::StringHash("#jchat_vanilla_hud_visible"),
+            []() -> bool {
+                auto const& hooks = ChatBehaviorHooks::instance();
+                return hooks.isShutdown() || !hooks.isEnabled();
+            },
+            []() -> bool { return true; }
+        );
+        mHudBindingReady.store(true, std::memory_order_release);
+        if (!mLoggedHudBindingReady.exchange(true, std::memory_order_relaxed) && mLogger) {
+            mLogger->info("JavaChat: HUD vanilla chat visibility binding ready (HudScreenController)");
+        }
+    } catch (...) {
+        mLastBoundHudCtrl.store(nullptr, std::memory_order_release);
+    }
+}
+
+void ChatBehaviorHooks::onCreateUISceneBefore(
+    std::string const&                           screenName,
+    std::shared_ptr<::ScreenController> const&   controller
+) noexcept {
+    try {
+        if (mShutdown.load(std::memory_order_relaxed) || !controller) return;
+        if (isHudSceneName(screenName)) {
+            if (!mLoggedSceneNameDiag.exchange(true, std::memory_order_relaxed) && mLogger) {
+                mLogger->info("JavaChat: CreateUIScene observed HUD screen '{}'", screenName);
+            }
+            onHudControllerCreated(controller.get());
+        } else if (isChatSceneName(screenName)) {
+            if (!mLoggedSceneNameDiag.exchange(true, std::memory_order_relaxed) && mLogger) {
+                mLogger->info("JavaChat: CreateUIScene observed chat screen '{}'", screenName);
+            }
+            ensureChatStaticVarsHook(controller.get());
+        }
+    } catch (...) {
+    }
+}
+
+void ChatBehaviorHooks::onChatAddStaticScreenVarsAfter(
+    ::ScreenController const* ctrl,
+    ::Json::Value&            globalVars
+) const noexcept {
+    try {
+        if (mShutdown.load(std::memory_order_relaxed) || !ctrl) return;
+        void const* const expectedVtbl = mChatStaticVarsVtbl.load(std::memory_order_acquire);
+        if (!expectedVtbl || !isReadableRange(ctrl, sizeof(void*))) return;
+        void* const* actualVtbl = *reinterpret_cast<void* const* const*>(ctrl);
+        if (actualVtbl != expectedVtbl) return;
+
+        auto const* chatCtrl = static_cast<::ChatScreenController const*>(ctrl);
+        bool const  useJchat = !chatCtrl->mIsDevConsole && mEnabled.load(std::memory_order_relaxed);
+        globalVars["$jchat_enabled"] = ::Json::Value(useJchat);
+    } catch (...) {
+    }
+}
+
+void ChatBehaviorHooks::ensureChatStaticVarsHook(::ScreenController const* ctrl) noexcept {
+    try {
+        if (!ctrl || mShutdown.load(std::memory_order_relaxed)) return;
+        if (mChatStaticVarsHookInstalled.load(std::memory_order_acquire)
+            || mChatStaticVarsAttempted.load(std::memory_order_acquire)) {
+            return;
+        }
+        std::lock_guard lock(mChatStaticVarsMutex);
+        if (mShutdown.load(std::memory_order_relaxed)
+            || mChatStaticVarsHookInstalled.load(std::memory_order_relaxed)
+            || mChatStaticVarsAttempted.load(std::memory_order_relaxed)) {
+            return;
+        }
+
+        // Latch before checking so incompatible vtables never retry every chat open.
+        mChatStaticVarsAttempted.store(true, std::memory_order_release);
+
+        auto const idxAddStatic  = getChatControllerVtableIndex(&::ScreenController::addStaticScreenVars);
+        auto const idxCanExit    = getChatControllerVtableIndex(&::ScreenController::canExit);
+        auto const idxOnLeave    = getChatControllerVtableIndex(&::ScreenController::onLeave);
+        auto const idxOnCreation = getChatControllerVtableIndex(&::ScreenController::onCreation);
+        if (!idxAddStatic || !idxCanExit || !idxOnLeave || !idxOnCreation) {
+            if (mLogger) {
+                mLogger->warn("JavaChat: failed to resolve ScreenController vtable indices for toggle hook");
+            }
+            return;
+        }
+
+        if (!isReadableRange(ctrl, sizeof(void*))) {
+            return;
+        }
+        void* const* vtbl = *reinterpret_cast<void* const* const*>(ctrl);
+        size_t const maxIdx = std::max({*idxAddStatic, *idxCanExit, *idxOnLeave, *idxOnCreation});
+        if (!vtbl || !isReadableRange(vtbl, (maxIdx + 1) * sizeof(void*))) {
+            return;
+        }
+
+        std::array<void const*, 3> const expectedCanExit{
+            ::ll::memory::SymbolView("?canExit@ScreenController@@UEAA_NXZ").resolve(true),
+            ::ll::memory::SymbolView("?$canExit@ScreenController@@QEAA_NXZ").resolve(true),
+            ::ll::memory::toFuncPtr(&::ScreenController::$canExit),
+        };
+        std::array<void const*, 3> const expectedOnLeave{
+            ::ll::memory::SymbolView("?onLeave@ScreenController@@UEAAXXZ").resolve(true),
+            ::ll::memory::SymbolView("?$onLeave@ScreenController@@QEAAXXZ").resolve(true),
+            ::ll::memory::toFuncPtr(&::ScreenController::$onLeave),
+        };
+        std::array<void const*, 3> const expectedOnCreation{
+            ::ll::memory::SymbolView("?onCreation@ScreenController@@UEAAXXZ").resolve(true),
+            ::ll::memory::SymbolView("?$onCreation@ScreenController@@QEAAXXZ").resolve(true),
+            ::ll::memory::toFuncPtr(&::ScreenController::$onCreation),
+        };
+
+        auto firstNonNull = [](std::array<void const*, 3> const& arr) -> void const* {
+            for (void const* p : arr) {
+                if (p) return p;
+            }
+            return nullptr;
+        };
+        if (!firstNonNull(expectedCanExit) || !firstNonNull(expectedOnLeave)
+            || !firstNonNull(expectedOnCreation)) {
+            if (mLogger) {
+                mLogger->warn("JavaChat: could not resolve ScreenController vtable anchors for toggle hook");
+            }
+            return;
+        }
+
+        if (!matchesAnyAnchor(vtbl[*idxCanExit], expectedCanExit)
+            || !matchesAnyAnchor(vtbl[*idxOnLeave], expectedOnLeave)
+            || !matchesAnyAnchor(vtbl[*idxOnCreation], expectedOnCreation)) {
+            if (!mLoggedChatStaticVarsMismatch.exchange(true, std::memory_order_relaxed) && mLogger) {
+                mLogger->warn(
+                    "JavaChat: ChatScreenController vtable anchor mismatch (ce=0x{:x}, lv=0x{:x}, cr=0x{:x})",
+                    reinterpret_cast<uintptr_t>(vtbl[*idxCanExit]),
+                    reinterpret_cast<uintptr_t>(vtbl[*idxOnLeave]),
+                    reinterpret_cast<uintptr_t>(vtbl[*idxOnCreation])
+                );
+            }
+            return;
+        }
+
+        void* target = const_cast<void*>(vtbl[*idxAddStatic]);
+        if (!target || codeAddressesMatch(target, vtbl[*idxCanExit])
+            || codeAddressesMatch(target, vtbl[*idxOnLeave])
+            || codeAddressesMatch(target, vtbl[*idxOnCreation])) {
+            if (mLogger) {
+                mLogger->warn("JavaChat: invalid ChatScreenController::addStaticScreenVars target address");
+            }
+            return;
+        }
+
+        mChatStaticVarsVtbl.store(vtbl, std::memory_order_release);
+        gOrigChatAddStaticVars.store(nullptr, std::memory_order_release);
+        std::atomic_ref<void*>(gOrigChatAddStaticVarsRaw).store(nullptr, std::memory_order_release);
+
+        int const rc = ::ll::memory::hook(
+            target,
+            reinterpret_cast<::ll::memory::FuncPtr>(&chatAddStaticScreenVarsDetour),
+            reinterpret_cast<::ll::memory::FuncPtr*>(&gOrigChatAddStaticVarsRaw),
+            ::ll::memory::HookPriority::Normal
+        );
+        void* const origRaw = std::atomic_ref<void*>(gOrigChatAddStaticVarsRaw).load(std::memory_order_acquire);
+        if (rc == 0 && origRaw != nullptr) {
+            gOrigChatAddStaticVars.store(reinterpret_cast<AddStaticScreenVarsFn>(origRaw), std::memory_order_release);
+            mChatStaticVarsTarget = target;
+            mChatStaticVarsHookInstalled.store(true, std::memory_order_release);
+            if (mLogger) {
+                mLogger->info("JavaChat: dynamic toggle hook ready (ChatScreenController::addStaticScreenVars)");
+            }
+        } else {
+            mChatStaticVarsVtbl.store(nullptr, std::memory_order_release);
+            gOrigChatAddStaticVars.store(nullptr, std::memory_order_release);
+            std::atomic_ref<void*>(gOrigChatAddStaticVarsRaw).store(nullptr, std::memory_order_release);
+            if (mLogger) {
+                mLogger->warn("JavaChat: ChatScreenController::addStaticScreenVars hook failed (rc={})", rc);
+            }
+        }
+    } catch (...) {
+        mChatStaticVarsAttempted.store(true, std::memory_order_release);
     }
 }
 
@@ -632,13 +963,26 @@ void ChatBehaviorHooks::clearPendingAutoClose() noexcept {
 void ChatBehaviorHooks::onScreenEntranceBefore(void const* scenePtr, bool& doScreenTransitions) noexcept {
     try {
         if (mShutdown.load(std::memory_order_relaxed)) return;
+        auto const* scene = static_cast<::UIScene const*>(scenePtr);
+        if (!scene) return;
+
+        // Belt-and-suspenders: ensure dynamic toggle hooks & HUD binding exist regardless of mEnabled.
+        if (scene->equalsScreenName("chat_screen")) {
+            if (!mChatStaticVarsHookInstalled.load(std::memory_order_acquire)
+                && !mChatStaticVarsAttempted.load(std::memory_order_acquire)
+                && scene->mScreenView) {
+                ensureChatStaticVarsHook(scene->mScreenView->mController.get());
+            }
+        } else if (scene->equalsScreenName("hud_screen")) {
+            if (!mHudBindingReady.load(std::memory_order_acquire) && scene->mScreenView) {
+                onHudControllerCreated(scene->mScreenView->mController.get());
+            }
+        }
+
         if (!mEnabled.load(std::memory_order_relaxed)) return;
         if (mKeepHudVisibleInChat.load(std::memory_order_relaxed)) {
             ensureIgnoreAsTopHook(scenePtr);
         }
-
-        auto const* scene = static_cast<::UIScene const*>(scenePtr);
-        if (!scene) return;
 
         bool const disableAnim = mDisableAnimations.load(std::memory_order_relaxed);
         bool const keepHud     = mKeepHudVisibleInChat.load(std::memory_order_relaxed)
@@ -1079,6 +1423,18 @@ void ChatBehaviorHooks::onAfterSendTrigger(void* controllerPtr, unsigned int vie
 
 void ChatBehaviorHooks::pollPendingAutoClose(ScreenView const& screenView) noexcept {
     try {
+        if (mForceCloseOnce.exchange(false, std::memory_order_acq_rel)) {
+            if (!mShutdown.load(std::memory_order_relaxed)) {
+                if (auto* chatCtrl = static_cast<::ChatScreenController*>(screenView.mController.get())) {
+                    clearPendingAutoClose();
+                    if (!chatCtrl->mIsDevConsole && !chatCtrl->mLeaveScreen.get().mShouldLeave) {
+                        chatCtrl->leaveScreen("chat_screen");
+                    }
+                }
+            }
+            return;
+        }
+
         void* pending = mPendingCloseCtrl.load(std::memory_order_acquire);
         if (!pending) return;
 
@@ -1113,10 +1469,20 @@ std::string ChatBehaviorHooks::statusSummary() const {
     char const* keepHudState = isKeepHudHookInstalled()
                                  ? "ready"
                                  : (mIgnoreAsTopAttempted.load(std::memory_order_relaxed) ? "off" : "pending");
+    char const* toggleState  = isChatStaticVarsHookInstalled()
+                                 ? "ready"
+                                 : (mChatStaticVarsAttempted.load(std::memory_order_relaxed)
+                                        ? "off"
+                                        : (isCreateSceneHookInstalled() ? "pending" : "off"));
+    char const* hudBindState = isHudBindingReady()
+                                 ? "ready"
+                                 : (isHudCtorHookInstalled() ? "pending" : "off");
     return std::string("autoClose=") + (isAutoCloseHookInstalled() ? "ready" : "off")
          + ", noAnim=" + (areAnimHooksInstalled() ? "ready" : "off")
          + ", syntax=" + (isTextRenderHookInstalled() ? "ready" : "off")
-         + ", keepHud=" + keepHudState;
+         + ", keepHud=" + keepHudState
+         + ", toggle=" + toggleState
+         + ", hudBind=" + hudBindState;
 }
 
 } // namespace javachat

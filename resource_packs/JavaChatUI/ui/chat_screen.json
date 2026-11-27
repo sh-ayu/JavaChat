@@ -1,38 +1,67 @@
 {
   "namespace": "chat",
 
-  // Force vanilla screen routing so server packs cannot inject heavy sidebars.
+  // Route cleanly between ultra-light JavaChat UI ($jchat_enabled = true) and untouched
+  // vanilla Bedrock chat UI ($jchat_enabled = false) for instant /jchat toggle switching.
   "chat_screen@common.base_screen": {
     "close_on_player_hurt": true,
     "send_telemetry": false,
-    "$screen_animations": [],
-    "$background_animations": [],
-    "$use_loading_bars": false,
+    "$jchat_enabled|default": true,
     "$jchat_font_type|default": "default",
-    "$screen_content": "chat.chat_screen_content",
-    "$screen_bg_content": "chat.chat_background",
-    "button_mappings": [
+    "$screen_content": "chat.jchat_screen_router",
+    "$screen_bg_content": "chat.jchat_bg_router",
+    "variables": [
       {
-        "from_button_id": "button.menu_exit",
-        "to_button_id": "button.chat_menu_cancel",
-        "mapping_type": "global"
+        "requires": "$jchat_enabled",
+        "$screen_animations": [],
+        "$background_animations": [],
+        "$use_loading_bars": false
+      }
+    ]
+  },
+
+  "jchat_screen_router": {
+    "type": "panel",
+    "size": ["100%", "100%"],
+    "controls": [
+      {
+        "jchat_active@chat.jchat_screen_content": {
+          "ignored": "(not $jchat_enabled)"
+        }
       },
       {
-        "from_button_id": "button.menu_cancel",
-        "to_button_id": "button.chat_menu_cancel",
-        "mapping_type": "global"
+        "vanilla_active@chat.chat_screen_content": {
+          "ignored": "$jchat_enabled"
+        }
+      }
+    ]
+  },
+
+  "jchat_bg_router": {
+    "type": "panel",
+    "size": ["100%", "100%"],
+    "controls": [
+      {
+        "jchat_bg@chat.jchat_background": {
+          "ignored": "(not $jchat_enabled)"
+        }
+      },
+      {
+        "vanilla_bg@chat.chat_background": {
+          "ignored": "$jchat_enabled"
+        }
       }
     ]
   },
 
   // Vanilla Java-style transparent backdrop (no full-screen dimming).
-  "chat_background": {
+  "jchat_background": {
     "type": "panel",
     "size": ["100%", "100%"]
   },
 
   // Authentic Java Edition style: plain translucent black bar (0x80000000), no border or accent strip.
-  "java_input_bg": {
+  "jchat_input_bg": {
     "type": "image",
     "texture": "textures/ui/White",
     "color": [0.0, 0.0, 0.0],
@@ -40,7 +69,7 @@
     "size": ["100%", "100%"]
   },
 
-  "java_input_bg_hover": {
+  "jchat_input_bg_hover": {
     "type": "image",
     "texture": "textures/ui/White",
     "color": [0.0, 0.0, 0.0],
@@ -49,7 +78,7 @@
   },
 
   // Single-Esc close + Java-style 12px bottom input box.
-  "text_edit_box@common.text_edit_box": {
+  "jchat_text_edit_box@common.text_edit_box": {
     "anchor_from": "top_left",
     "anchor_to": "top_left",
     "size": ["100%", 12],
@@ -61,8 +90,8 @@
     "$focus_id": "text_edit_box_focus_id",
     "$focus_override_left": "",
     "$text_box_tts_header": "accessibility.chat.tts.textboxTitle",
-    "$text_background_default": "chat.java_input_bg",
-    "$text_background_hover": "chat.java_input_bg_hover",
+    "$text_background_default": "chat.jchat_input_bg",
+    "$text_background_hover": "chat.jchat_input_bg_hover",
     "$text_edit_clipping_panel_size": ["100% + 2px", 12],
     "$text_offset": [-1, 0],
     "$text_edit_box_label_offset": [0, 0],
@@ -214,14 +243,26 @@
     ]
   },
 
-  // Ultra-lightweight chat screen: ONLY bottom 12px input box.
+  // Ultra-lightweight JavaChat screen content: ONLY bottom 12px input box + single-Esc close.
   // Suggestions popup & syntax/ghost visuals are rendered natively by C++ AfterUIRenderEvent.
-  "chat_screen_content": {
+  "jchat_screen_content": {
     "type": "panel",
     "size": ["100%", "100%"],
+    "button_mappings": [
+      {
+        "from_button_id": "button.menu_exit",
+        "to_button_id": "button.chat_menu_cancel",
+        "mapping_type": "global"
+      },
+      {
+        "from_button_id": "button.menu_cancel",
+        "to_button_id": "button.chat_menu_cancel",
+        "mapping_type": "global"
+      }
+    ],
     "controls": [
       {
-        "chat_bottom_panel@chat.chat_bottom_panel": {
+        "chat_bottom_panel@chat.jchat_bottom_panel": {
           "layer": 2
         }
       }
@@ -229,7 +270,7 @@
   },
 
   // Authentic Java-style 12px bottom input bar (offset [2, -2], width calc(100% - 4px)).
-  "chat_bottom_panel": {
+  "jchat_bottom_panel": {
     "type": "panel",
     "anchor_from": "bottom_left",
     "anchor_to": "bottom_left",
@@ -238,7 +279,7 @@
     "min_size": ["100% - 4px", 12],
     "controls": [
       {
-        "text_box@chat.text_edit_box": {}
+        "text_box@chat.jchat_text_edit_box": {}
       }
     ]
   }

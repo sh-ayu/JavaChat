@@ -31,11 +31,9 @@
 #include <ll/api/io/Logger.h>
 #include <ll/api/mod/NativeMod.h>
 #include <ll/api/service/TargetedBedrock.h>
-#include <ll/api/thread/ClientThreadExecutor.h>
 
 #include <mc/client/game/ClientInstance.h>
 #include <mc/client/game/IMinecraftGame.h>
-#include <mc/resources/ResourcePackManager.h>
 #include <mc/client/gui/FontRepository.h>
 #include <mc/client/gui/GuiData.h>
 #include <mc/client/gui/GuiMessage.h>
@@ -357,7 +355,7 @@ bool JavaChatMod::enable() {
     bool pinHookOk = PackPinner::instance().install(
         &mSelf->getLogger(),
         kUiPackUuid,
-        computePackPinMode(cfgCopy.enabled, cfgCopy.overrideServerChatUi),
+        cfgCopy.overrideServerChatUi,
         cfgCopy.verboseLog
     );
     if (!pinHookOk) {
@@ -398,13 +396,14 @@ bool JavaChatMod::enable() {
         mLastHoverMouseY         = -1.0f;
         mDraggingScrollbar       = false;
         mLastLevelPtr            = nullptr;
+        mLastHudScreenView       = nullptr;
+        mLastHudSyncedEnabled.reset();
         mCachedDisplayTextScreen = nullptr;
         mCachedDisplayTextCtrl.reset();
     }
     mInGameHudOrChat.store(false, std::memory_order_relaxed);
     mLastHudOrChatMs.store(0, std::memory_order_relaxed);
     mF3DLatched.store(false, std::memory_order_relaxed);
-    mPendingUiReload.store(false, std::memory_order_relaxed);
 
     auto& bus = ll::event::EventBus::getInstance();
 
@@ -482,7 +481,6 @@ bool JavaChatMod::disable() {
     mInGameHudOrChat.store(false, std::memory_order_relaxed);
     mLastHudOrChatMs.store(0, std::memory_order_relaxed);
     mF3DLatched.store(false, std::memory_order_relaxed);
-    mPendingUiReload.store(false, std::memory_order_relaxed);
 
     // 2) Remove all EventBus listeners before unhooking or releasing font references.
     auto& bus = ll::event::EventBus::getInstance();
@@ -511,6 +509,8 @@ bool JavaChatMod::disable() {
         mLastHoverMouseY         = -1.0f;
         mDraggingScrollbar       = false;
         mLastLevelPtr            = nullptr;
+        mLastHudScreenView       = nullptr;
+        mLastHudSyncedEnabled.reset();
         mCachedDisplayTextScreen = nullptr;
         mCachedDisplayTextCtrl.reset();
     }
@@ -524,6 +524,8 @@ void JavaChatMod::onWorldTransition() noexcept {
         ChatFontManager::instance().invalidateUiSync();
         std::lock_guard lock(mMutex);
         mLastLevelPtr = nullptr;
+        mLastHudScreenView = nullptr;
+        mLastHudSyncedEnabled.reset();
         mHistory.resetSyncCursor();
         if (mConfig.clearHistoryOnWorldSwitch) {
             mHistory.clear();
@@ -585,37 +587,6 @@ void JavaChatMod::clearInputSelectionStateLocked() noexcept {
     mLastObservedInput.clear();
     mInputAllSelected = false;
     mSelectedTextSnapshot.clear();
-}
-
-void JavaChatMod::scheduleUiPackReload() noexcept {
-    try {
-        ll::thread::ClientThreadExecutor::getDefault().execute([this]() { applyUiPackReloadOnClientThread(); });
-    } catch (...) {
-    }
-}
-
-void JavaChatMod::applyUiPackReloadOnClientThread() noexcept {
-    try {
-        if (mShutdown.load(std::memory_order_relaxed)) return;
-        auto clientRef = ll::service::getClientInstance();
-        if (!clientRef) return;
-        auto& client = clientRef.value();
-        if (!client.getMinecraftGame().isInGame()) return;
-
-        // Wait until chat_screen is completely gone before rebuilding UI definitions.
-        if (client.getScreenName() == "chat_screen") {
-            mPendingUiReload.store(true, std::memory_order_release);
-            return;
-        }
-
-        client.getResourcePackManager()._composeFullStack();
-        client.getMinecraftGame().handleReloadUIDefinitions();
-        ChatFontManager::instance().invalidateUiSync();
-        if (mSelf) {
-            mSelf->getLogger().info("JavaChat: reloaded UI pack stack ({})", PackPinner::instance().statusSummary());
-        }
-    } catch (...) {
-    }
 }
 
 void JavaChatMod::showToastLocked(std::string text, double nowSec) {
@@ -686,8 +657,21 @@ void JavaChatMod::renderChatLayer(ll::event::render::UIRenderEvent& event, bool 
             mChatOpen.store(false, std::memory_order_relaxed);
             mInGameHudOrChat.store(true, std::memory_order_relaxed);
             mLastHudOrChatMs.store(steadyNowMs(), std::memory_order_relaxed);
-            if (mPendingUiReload.exchange(false, std::memory_order_acq_rel)) {
-                scheduleUiPackReload();
+            bool const curEnabled  = ChatBehaviorHooks::instance().isEnabled();
+            bool       needRefresh = false;
+            {
+                std::lock_guard lock(mMutex);
+                if (mLastHudScreenView != &event.screenView() || !mLastHudSyncedEnabled.has_value()
+                    || *mLastHudSyncedEnabled != curEnabled) {
+                    mLastHudScreenView    = &event.screenView();
+                    mLastHudSyncedEnabled = curEnabled;
+                    needRefresh           = true;
+                }
+            }
+            if (needRefresh) {
+                if (auto* hudCtrl = event.screenView().mController.get()) {
+                    hudCtrl->mBindingRefreshRequested = true;
+                }
             }
         } else {
             mChatOpen.store(false, std::memory_order_relaxed);
@@ -1674,9 +1658,9 @@ bool JavaChatMod::toggleEnabled() {
         exitSearchModeLocked(false);
         clearInputSelectionStateLocked();
     }
-    PackPinner::instance().setMode(computePackPinMode(mConfig.enabled, mConfig.overrideServerChatUi));
-    mPendingUiReload.store(true, std::memory_order_release);
+    PackPinner::instance().setEnabled(mConfig.overrideServerChatUi);
     ChatBehaviorHooks::instance().setEnabled(mConfig.enabled);
+    ChatBehaviorHooks::instance().requestCloseCurrentChatOnce();
     saveConfigLocked();
     return mConfig.enabled;
 }
@@ -1705,30 +1689,31 @@ bool JavaChatMod::reloadConfig(std::string& messageOut) {
         bool        dummyCustom = false;
         ChatFontManager::instance().prepareFontSpec("default", dummyMsg, dummyCustom);
     }
+    bool prevEnabled = false;
+    bool newEnabled  = false;
     {
         std::lock_guard lock(mMutex);
-        bool const      packModeChanged =
-            (mConfig.enabled != loaded.config.enabled)
-            || (mConfig.overrideServerChatUi != loaded.config.overrideServerChatUi);
-        mConfig = loaded.config;
+        prevEnabled = mConfig.enabled;
+        mConfig     = loaded.config;
         if (!fontOk) {
             mConfig.font = "default";
         }
+        newEnabled = mConfig.enabled;
         if (!mConfig.enabled) {
             mDraggingScrollbar = false;
             exitSearchModeLocked(false);
             clearInputSelectionStateLocked();
         }
         mHistory.trimToMax(mConfig.maxHistoryMessages);
-        PackPinner::instance().setMode(computePackPinMode(mConfig.enabled, mConfig.overrideServerChatUi));
+        PackPinner::instance().setEnabled(mConfig.overrideServerChatUi);
         PackPinner::instance().setVerbose(mConfig.verboseLog);
-        if (packModeChanged) {
-            mPendingUiReload.store(true, std::memory_order_release);
-        }
         ChatBehaviorHooks::instance().setEnabled(mConfig.enabled);
         ChatBehaviorHooks::instance().setAutoCloseOnSend(mConfig.autoCloseOnSend);
         ChatBehaviorHooks::instance().setDisableAnimations(mConfig.disableChatAnimations);
         ChatBehaviorHooks::instance().setKeepHudVisibleInChat(mConfig.keepHudVisibleInChat);
+    }
+    if (prevEnabled != newEnabled) {
+        ChatBehaviorHooks::instance().requestCloseCurrentChatOnce();
     }
     messageOut = "JavaChat: config reloaded";
     if (!fontOk) messageOut += " (" + fontMsg + ")";
@@ -1740,20 +1725,19 @@ bool JavaChatMod::reloadConfig(std::string& messageOut) {
 void JavaChatMod::resetConfig() {
     {
         std::lock_guard lock(mMutex);
-        bool const      prevEnabled  = mConfig.enabled;
-        bool const      prevOverride = mConfig.overrideServerChatUi;
-        mConfig                      = ChatConfig{};
+        bool const prevEnabled = mConfig.enabled;
+        mConfig = ChatConfig{};
         sanitizeConfig(mConfig);
         mHistory.trimToMax(mConfig.maxHistoryMessages);
-        PackPinner::instance().setMode(computePackPinMode(mConfig.enabled, mConfig.overrideServerChatUi));
+        PackPinner::instance().setEnabled(mConfig.overrideServerChatUi);
         PackPinner::instance().setVerbose(mConfig.verboseLog);
-        if (prevEnabled != mConfig.enabled || prevOverride != mConfig.overrideServerChatUi) {
-            mPendingUiReload.store(true, std::memory_order_release);
-        }
         ChatBehaviorHooks::instance().setEnabled(mConfig.enabled);
         ChatBehaviorHooks::instance().setAutoCloseOnSend(mConfig.autoCloseOnSend);
         ChatBehaviorHooks::instance().setDisableAnimations(mConfig.disableChatAnimations);
         ChatBehaviorHooks::instance().setKeepHudVisibleInChat(mConfig.keepHudVisibleInChat);
+        if (prevEnabled != mConfig.enabled) {
+            ChatBehaviorHooks::instance().requestCloseCurrentChatOnce();
+        }
         saveConfigLocked();
     }
     std::string fontMsg;
