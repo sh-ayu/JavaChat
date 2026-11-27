@@ -2,6 +2,11 @@
 
 All notable changes to **JavaChat** will be documented in this file.
 
+## [1.1.1] - 2026-11-27
+
+- Fix `/jchat toggle` so the chat input and HUD return to the default Bedrock UI when JavaChat is disabled, without restarting or rejoining.
+- Add in-game screenshots of both chat layouts and command autocomplete to the English and Japanese READMEs.
+
 ## [1.1.0] - 2026-11-26
 
 Authentic Java Edition chat UI overhaul, Brigadier-style command suggestions & syntax highlighting, `Ctrl+A` input editing, frame-time optimizations, and custom/built-in font support.
