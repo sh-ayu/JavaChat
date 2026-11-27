@@ -6,7 +6,7 @@ version = "1.2.0"
 name = "JavaChat"
 description = "Lightweight Java Edition style chat overlay and minimal input bar for Minecraft Bedrock."
 tags = ["visual", "utility", "optimization"]
-logo = "https://avatars.githubusercontent.com/u/174009190"
+logo = "https://raw.githubusercontent.com/sh-ayu/JavaChat/main/assets/icon.png"
 
 [[variants.""]]
 side = "client"
