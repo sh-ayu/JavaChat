@@ -6,6 +6,7 @@
   "info": {
     "name": "JavaChat",
     "description": "Lightweight Java Edition style chat overlay and minimal input bar for Minecraft Bedrock.",
+    "avatar_url": "https://raw.githubusercontent.com/sh-ayu/JavaChat/main/assets/icon.png",
     "tags": [
       "platform:levilamina",
       "type:mod"
