@@ -2,6 +2,12 @@
 
 All notable changes to **JavaChat** will be documented in this file.
 
+## [1.2.1] - 2026-11-27
+
+### Changed
+
+- Add a mod icon (`assets/icon.png`) and use it as the package logo on LeviMC Mods instead of the author's avatar. No code changes.
+
 ## [1.2.0] - 2026-11-27
 
 - **Player heads in chat** via the new companion mod [ChatHeads](https://github.com/sh-ayu/ChatHeads). When `ChatHeads.dll` is loaded, JavaChat draws each sender's face to the left of the first line of their message, in both closed HUD chat and open chat, and indents wrapped lines to match. Senders come from `GuiMessage` author/username metadata or ChatHeads' server-format name detection.
